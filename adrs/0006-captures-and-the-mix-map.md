@@ -38,8 +38,8 @@ longer match the project are worse than none.
    project file, `<project>.mort/captures/`, in a compact binary format
    with a JSON index. They reload when the project opens. An unsaved
    project keeps its captures in memory only.
-6. **Size:** a frame is about 200 bytes (ADR 0007). Five minutes of
-   40 tracks is about 48 MB. Old captures that are fully replaced are
+6. **Size:** a frame is 220 bytes (ADR 0007). Five minutes of
+   40 tracks is about 53 MB. Old captures that are fully replaced are
    deleted.
 
 ## Consequences
