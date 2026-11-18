@@ -45,6 +45,11 @@ dependencies = [
 [[package]]
 name = "mort-session"
 version = "0.1.0"
+dependencies = [
+ "mort-proto",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "proc-macro2"

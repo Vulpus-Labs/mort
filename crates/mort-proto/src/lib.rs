@@ -5,10 +5,12 @@
 //! - [`position`]: musical and clock positions, their parsing, and
 //!   conversion to project seconds through a [`position::TempoMap`]
 //!   (ADR 0003 §4).
+//! - [`model`]: the project records the bridge reads and returns.
 //! - [`rpc`]: the JSON-RPC 2.0 envelope, `batch`, and mort's error shape
 //!   (ADR 0002).
 
 pub mod ids;
+pub mod model;
 pub mod position;
 pub mod rpc;
 
