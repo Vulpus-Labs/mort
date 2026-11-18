@@ -18,13 +18,29 @@ down from a section to a track to a band.
    - sample peak, and true peak (4× oversampled, BS.1770 Annex 2);
    - RMS and crest factor;
    - mid energy in 31 third-octave bands from 20 Hz to 20 kHz (ISO 266
-     centres). Whether these come from an IIR filter bank or a long FFT is
-     decided by measuring accuracy and cost in ticket 0010;
+     centres);
    - side energy per octave;
    - L/R correlation, and correlation below 150 Hz;
    - spectral centroid and spectral flatness;
    - onset strength (spectral flux), from which transient density is
      derived.
+
+   Bands come from FFTs, not an IIR filter bank. Ticket 0010 measured
+   both at 48 kHz on an M3. A full-rate bank of sixth-order Butterworth
+   band-passes was accurate on sines (0.02 dB) but read pink noise up to
+   0.33 dB high through its skirts, and cost 0.47 % of real time per
+   stereo instance for the bands alone. One 32768-point FFT per frame was
+   accurate (0.06 dB on sines, 0.12 dB on pink noise) but cost 0.31 %. We
+   use two resolutions instead: an 85 ms FFT at the full rate for bands
+   from 800 Hz up, and a 683 ms FFT of the signal decimated by 16 for bands
+   up to 630 Hz, with each bin weighted into bands by how much of it lies
+   inside. It is as accurate as the long FFT, and the whole analyzer,
+   every feature included, costs 0.11 % per instance (40 instances use
+   4.3 % of a core). The FFTs also give the centroid, flatness and onset
+   strength, which a filter bank would need a separate FFT for. The price
+   is time resolution: bands below 708 Hz describe the last 683 ms, not
+   the last 50 ms. The frame layout is `mort_features::Frame`, 220 bytes.
+
 2. **Findings** are computed from the map over a range. Each one carries:
    - `kind`, `section`, `range`, `tracks`, `bands`;
    - `severity` (0–1);
