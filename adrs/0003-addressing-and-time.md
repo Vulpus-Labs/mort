@@ -25,10 +25,16 @@ are made in seconds.
    and can set a value from display text where the plugin supports it.
 4. **Positions** in the protocol are project seconds (`f64`). The CLI and
    `mort-proto` parse and print musical positions:
-   - `9.1` is bar 9, beat 1
+   - `9` or `9.1` is bar 9, beat 1. Beats are in units of the bar's
+     time-signature denominator, so beat 4 of a 6/8 bar is the fourth
+     eighth note.
    - `9.2.240` adds ticks at 960 per quarter note
-   - `+4b` is four beats after the previous position
+   - `+4b` is four quarter notes after the previous position, and `+1.5s`
+     is 1.5 seconds after it
    - `12.5s` is seconds
+
+   A range is `start..end`, and a relative end is measured from the start,
+   as in `9.1..+8b`.
 
    Conversion uses REAPER's tempo map (`TimeMap2_*`), which the bridge
    provides, so tempo changes are respected.
