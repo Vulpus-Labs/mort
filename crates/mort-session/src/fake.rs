@@ -473,11 +473,8 @@ fn fx_info(f: &FakeFx, index: usize) -> FxInfo {
     FxInfo {
         id: f.id,
         index,
-        name: f
-            .plugin
-            .split_once(": ")
-            .map_or(f.plugin.as_str(), |(_, n)| n)
-            .to_owned(),
+        // REAPER shows the plugin's full name, prefix included, until renamed.
+        name: f.plugin.clone(),
         plugin: f.plugin.clone(),
         enabled: f.enabled,
     }

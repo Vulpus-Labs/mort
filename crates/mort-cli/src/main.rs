@@ -5,6 +5,8 @@
 
 mod client;
 mod install;
+mod resolve;
+mod show;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -42,6 +44,25 @@ enum Command {
         method: String,
         /// Its parameters, as JSON. Defaults to none.
         params: Option<String>,
+    },
+
+    /// List tracks with their levels, FX and sends.
+    Tracks,
+
+    /// List the FX on a track.
+    Fx {
+        /// The track: number, name, part of a name, id, or `master`.
+        track: String,
+    },
+
+    /// List an FX instance's parameters.
+    Params {
+        /// The track: number, name, part of a name, id, or `master`.
+        track: String,
+        /// The FX: position in the chain, name, part of a name, or id.
+        fx: String,
+        /// Show only parameters whose names contain this.
+        filter: Option<String>,
     },
 
     /// Copy the bridge and probe into REAPER's folders.
@@ -102,6 +123,15 @@ fn connect(cli: &Cli) -> Result<(Client, Value), Failure> {
     Client::connect(&path)
 }
 
+/// Text lines with the state last (ADR 0009 §2), or the raw result.
+fn with_state(cli: &Cli, result: &Value, mut lines: Vec<String>) -> Vec<String> {
+    if cli.json {
+        return vec![result.to_string()];
+    }
+    lines.push(format!("state {}", result["state"]));
+    lines
+}
+
 fn yes_no(v: &Value) -> &'static str {
     if v.as_bool() == Some(true) {
         "yes"
@@ -145,6 +175,35 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
             } else {
                 serde_json::to_string_pretty(&r).expect("values serialise")
             }])
+        }
+        Command::Tracks => {
+            let (mut c, _) = connect(cli)?;
+            let list = c.call("tracks.list", Value::Null)?;
+            Ok(with_state(cli, &list, show::tracks(&list)))
+        }
+        Command::Fx { track } => {
+            let (mut c, _) = connect(cli)?;
+            let list = c.call("tracks.list", Value::Null)?;
+            let t = resolve::track(&list, track)?;
+            if cli.json {
+                return Ok(vec![
+                    json!({ "track": t, "state": list["state"] }).to_string(),
+                ]);
+            }
+            Ok(with_state(cli, &list, show::fx(t)))
+        }
+        Command::Params { track, fx, filter } => {
+            let (mut c, _) = connect(cli)?;
+            let list = c.call("tracks.list", Value::Null)?;
+            let t = resolve::track(&list, track)?;
+            let f = resolve::fx(t, fx)?;
+            let r = c.call("fx.params", json!({ "fx": f["id"] }))?;
+            let name = t["name"].as_str().unwrap_or("?");
+            Ok(with_state(
+                cli,
+                &r,
+                show::params(&r, name, filter.as_deref()),
+            ))
         }
         Command::Install {
             from,

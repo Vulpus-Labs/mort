@@ -263,7 +263,7 @@ fn fx_chain_order() {
     let (t, info) = s.fx(eq).unwrap();
     assert_eq!(
         (t, info.index, info.name.as_str()),
-        (bass, 2, "ReaEQ (Cockos)")
+        (bass, 2, "VST: ReaEQ (Cockos)")
     );
     assert_eq!(kind(s.move_fx(eq, 3)), ErrorKind::Invalid);
 }

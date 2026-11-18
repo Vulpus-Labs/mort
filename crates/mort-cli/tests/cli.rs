@@ -22,6 +22,10 @@ struct FakeBridge {
 
 impl FakeBridge {
     fn start(name: &str) -> FakeBridge {
+        Self::start_with(name, |_| {})
+    }
+
+    fn start_with(name: &str, setup: impl FnOnce(&mut FakeSession) + Send + 'static) -> FakeBridge {
         let dir = std::env::temp_dir().join(format!("mort-cli-{}-{name}", std::process::id()));
         let socket = dir.join("bridge.sock");
         let stop = Arc::new(AtomicBool::new(false));
@@ -42,7 +46,9 @@ impl FakeBridge {
                 });
                 d.register("test.echo", false, |_, p| Outcome::Value(Ok(p)));
                 d.set_held(true);
+                mort_bridge::methods::register_reads(&mut d);
                 let mut session = FakeSession::new();
+                setup(&mut session);
                 ready_tx.send(()).unwrap();
                 while !stop.load(Ordering::SeqCst) {
                     d.tick(&mut session, Instant::now(), Duration::from_millis(8));
@@ -257,4 +263,163 @@ fn install_without_a_build_says_how() {
     );
     assert_eq!(o.status.code(), Some(0));
     assert!(stdout(&o).contains("probe   not built"), "{}", stdout(&o));
+}
+
+fn band(s: &mut FakeSession) {
+    use mort_session::{NewTrack, Session, TrackChange};
+    let drums = s
+        .add_track(NewTrack {
+            name: "Drums".into(),
+            ..NewTrack::default()
+        })
+        .unwrap();
+    let kick = s
+        .add_track(NewTrack {
+            name: "Kick".into(),
+            parent: Some(drums),
+            ..NewTrack::default()
+        })
+        .unwrap();
+    let bass = s
+        .add_track(NewTrack {
+            name: "Bass".into(),
+            ..NewTrack::default()
+        })
+        .unwrap();
+    s.add_track(NewTrack {
+        name: "Bass DI".into(),
+        ..NewTrack::default()
+    })
+    .unwrap();
+    let verb = s
+        .add_track(NewTrack {
+            name: "Verb".into(),
+            ..NewTrack::default()
+        })
+        .unwrap();
+    s.set_track(
+        bass,
+        &TrackChange {
+            volume: Some(0.5),
+            pan: Some(-0.2),
+            mute: Some(true),
+            ..TrackChange::default()
+        },
+    )
+    .unwrap();
+    s.add_send(kick, verb).unwrap();
+    s.add_fx(bass, "ReaEQ", None).unwrap();
+    let comp = s.add_fx(bass, "ReaComp", None).unwrap();
+    s.set_fx_enabled(comp, false).unwrap();
+    s.add_region("verse", 0.0, Some(16.0));
+}
+
+#[test]
+fn tracks_listing() {
+    let b = FakeBridge::start_with("tracks", band);
+    let o = b.mort(&["tracks"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let t = stdout(&o);
+    let line = |name: &str| {
+        t.lines()
+            .find(|l| l.contains(name))
+            .unwrap_or_else(|| panic!("{name} in {t}"))
+            .to_owned()
+    };
+    assert!(
+        line("  Kick").contains("→ Verb 0.0 dB"),
+        "kick is indented under drums, with its send: {t}"
+    );
+    let bass = line("Bass  ");
+    assert!(
+        bass.starts_with("3 ")
+            && bass.contains("-6.0 dB")
+            && bass.contains("L20")
+            && bass.contains(" M "),
+        "{bass}"
+    );
+    assert!(
+        bass.contains("VST: ReaEQ (Cockos), (VST: ReaComp (Cockos))"),
+        "bypassed FX in brackets: {bass}"
+    );
+    assert!(line("MASTER").starts_with("   "), "master has no number");
+    assert!(t.trim_end().lines().last().unwrap().starts_with("state "));
+
+    let o = b.mort(&["--json", "tracks"]);
+    let v: Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["tracks"].as_array().unwrap().len(), 5);
+    assert!(v["state"].as_u64().unwrap() > 1);
+}
+
+#[test]
+fn fx_and_params_by_name() {
+    let b = FakeBridge::start_with("params", band);
+    let o = b.mort(&["fx", "bass"]);
+    let t = stdout(&o);
+    assert!(
+        t.starts_with("FX on Bass (2)"),
+        "exact name beats `Bass DI`: {t}"
+    );
+    assert!(t.contains("2  VST: ReaComp (Cockos)  bypassed"), "{t}");
+
+    let o = b.mort(&["params", "3", "eq"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let t = stdout(&o);
+    assert!(
+        t.starts_with("VST: ReaEQ (Cockos) on Bass: 3 of 3 parameters"),
+        "{t}"
+    );
+    assert!(t.contains("0  Freq-Band 1  0.500  632 Hz"), "{t}");
+
+    let o = b.mort(&["params", "bass", "1", "gain"]);
+    let t = stdout(&o);
+    assert!(
+        t.contains("1 of 3") && t.contains("Gain-Band 1") && !t.contains("Freq"),
+        "{t}"
+    );
+}
+
+#[test]
+fn ambiguous_names_list_the_matches() {
+    let b = FakeBridge::start_with("ambiguous", band);
+    let o = b.mort(&["fx", "ba"]);
+    assert_eq!(o.status.code(), Some(1));
+    let e = stderr(&o);
+    assert!(
+        e.contains("matches 2 tracks") && e.contains("3 Bass") && e.contains("4 Bass DI"),
+        "{e}"
+    );
+    let o = b.mort(&["params", "bass", "delay"]);
+    assert!(
+        stderr(&o).contains("no FX matches `delay`"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn time_convert_uses_the_tempo_map() {
+    let b = FakeBridge::start_with("time", band);
+    let o = b.mort(&[
+        "--json",
+        "call",
+        "time.convert",
+        r#"{"to_seconds": ["9.1", "+4b", "1.1..+8b"], "to_musical": [16.5]}"#,
+    ]);
+    let v: Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["seconds"], json!([16.0, 18.0, [0.0, 4.0]]));
+    assert_eq!(v["musical"], json!(["9.2"]));
+    let o = b.mort(&["call", "time.convert", r#"{"to_seconds": ["9.9"]}"#]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("bar 9 is in 4/4"), "{}", stderr(&o));
+}
+
+#[test]
+fn project_get_has_regions() {
+    let b = FakeBridge::start_with("project", band);
+    let o = b.mort(&["--json", "call", "project.get"]);
+    let v: Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["project"]["name"], "untitled");
+    assert_eq!(v["regions"][0]["name"], "verse");
+    assert!(v["state"].is_u64());
 }

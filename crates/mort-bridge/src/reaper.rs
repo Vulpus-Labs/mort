@@ -23,12 +23,19 @@ use reaper_medium::{
     PositionInQuarterNotes, PositionInSeconds, ProjectContext, Reaper, ReaperSession, UndoScope,
 };
 
+use mort_proto::model::SendInfo;
 use mort_proto::model::{
     ControlChange, EnvelopeInfo, EnvelopePoint, EnvelopeTarget, FxInfo, ItemInfo, Note, ParamInfo,
     ProjectInfo, Region, TrackInfo,
 };
-use mort_proto::{EnvelopeId, ErrorKind, ErrorObject, FxId, Guid, ItemId, TempoMap, TrackId};
-use mort_session::{NewTrack, Result, SendChange, Session, TrackChange};
+use mort_proto::{
+    EnvelopeId, ErrorKind, ErrorObject, FxId, Guid, ItemId, TakeId, TempoMap, TrackId,
+};
+use mort_session::{NewTrack, Result, SendChange, Session, TrackChange, not_found};
+use reaper_low::raw::MediaTrack;
+use std::os::raw::c_int;
+
+use crate::raw;
 
 use crate::dispatch::{BUILD, Dispatcher};
 use crate::server::{Server, socket_dir};
@@ -94,7 +101,11 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
                 reaper,
                 _session: Some(session),
             },
-            dispatcher: Dispatcher::new(rx),
+            dispatcher: {
+                let mut d = Dispatcher::new(rx);
+                crate::methods::register_reads(&mut d);
+                d
+            },
             _server: server,
         });
     });
@@ -127,6 +138,95 @@ struct Live {
 impl Live {
     fn low(&self) -> &reaper_low::Reaper {
         self.reaper.low()
+    }
+
+    fn all_tracks(&self) -> Vec<*mut MediaTrack> {
+        let mut v = vec![raw::master(self.low())];
+        v.extend(raw::tracks(self.low()));
+        v
+    }
+
+    fn find_track(&self, id: TrackId) -> Result<*mut MediaTrack> {
+        self.all_tracks()
+            .into_iter()
+            .find(|t| raw::track_guid(self.low(), *t) == id.0)
+            .ok_or_else(|| not_found("track", id, "list tracks with `mort tracks`"))
+    }
+
+    fn find_fx(&self, id: FxId) -> Result<(*mut MediaTrack, c_int)> {
+        let r = self.low();
+        self.all_tracks()
+            .into_iter()
+            .find_map(|t| {
+                (0..raw::fx_count(r, t))
+                    .find(|i| raw::fx_guid(r, t, *i) == Some(id.0))
+                    .map(|i| (t, i))
+            })
+            .ok_or_else(|| not_found("FX", id, "list a track's FX with `mort fx <track>`"))
+    }
+
+    fn param_index(&self, t: *mut MediaTrack, fx: c_int, id: FxId, index: u32) -> Result<c_int> {
+        c_int::try_from(index)
+            .ok()
+            .filter(|i| *i < raw::param_count(self.low(), t, fx))
+            .ok_or_else(|| {
+                not_found(
+                    "parameter",
+                    format!("{id} #{index}"),
+                    "list parameters with `mort params <track> <fx>`",
+                )
+            })
+    }
+
+    fn fx_info(&self, t: *mut MediaTrack, i: c_int) -> FxInfo {
+        let r = self.low();
+        let name = raw::fx_name(r, t, i);
+        FxInfo {
+            id: FxId(raw::fx_guid(r, t, i).unwrap_or(Guid(0))),
+            index: usize::try_from(i).unwrap_or(0),
+            plugin: raw::fx_config(r, t, i, "fx_name").unwrap_or_else(|| name.clone()),
+            name,
+            enabled: raw::fx_enabled(r, t, i),
+        }
+    }
+
+    fn track_info(&self, t: *mut MediaTrack) -> TrackInfo {
+        let r = self.low();
+        let number = raw::track_value(r, t, "IP_TRACKNUMBER");
+        let is_master = t == raw::master(r);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "REAPER track numbers are small positive integers held in a double"
+        )]
+        let index = (!is_master && number >= 1.0).then(|| number as usize - 1);
+        let sends = (0..raw::send_count(r, t))
+            .map(|s| SendInfo {
+                dest: TrackId(raw::track_guid(r, raw::send_dest(r, t, s))),
+                volume: raw::send_value(r, t, s, "D_VOL"),
+                pan: raw::send_value(r, t, s, "D_PAN"),
+                mute: raw::send_value(r, t, s, "B_MUTE") != 0.0,
+            })
+            .collect();
+        TrackInfo {
+            id: TrackId(raw::track_guid(r, t)),
+            index,
+            name: if is_master {
+                "MASTER".into()
+            } else {
+                raw::track_string(r, t, "P_NAME")
+            },
+            parent: raw::parent(r, t).map(|p| TrackId(raw::track_guid(r, p))),
+            main_send: is_master || raw::track_value(r, t, "B_MAINSEND") != 0.0,
+            volume: raw::track_value(r, t, "D_VOL"),
+            pan: raw::track_value(r, t, "D_PAN"),
+            mute: raw::track_value(r, t, "B_MUTE") != 0.0,
+            solo: raw::track_value(r, t, "I_SOLO") > 0.0,
+            sends,
+            fx: (0..raw::fx_count(r, t))
+                .map(|i| self.fx_info(t, i))
+                .collect(),
+        }
     }
 }
 
@@ -161,7 +261,9 @@ impl TempoMap for Live {
         let r = self
             .reaper
             .time_map_qn_to_measures(PROJ, PositionInQuarterNotes::new_panic(qn));
-        u32::try_from(r.measure_index).map_or(1, |m| m + 1)
+        // Despite reaper-medium's field name, REAPER returns the bar number
+        // counted from 1 (checked against REAPER 7.67 by scripts/smoke.sh).
+        u32::try_from(r.measure_index).map_or(1, |m| m.max(1))
     }
 
     fn qn_to_seconds(&self, qn: f64) -> f64 {
@@ -206,7 +308,7 @@ impl Session for Live {
             } else {
                 name.into()
             },
-            path: None,
+            path: raw::project_path(self.low()),
             sample_rate: rate,
             length,
         }
@@ -221,19 +323,30 @@ impl Session for Live {
     }
 
     fn regions(&self) -> Vec<Region> {
-        Vec::new()
+        (0..)
+            .map_while(|i| raw::marker(self.low(), i))
+            .map(|(is_region, number, name, start, end)| Region {
+                number: u32::try_from(number).unwrap_or(0),
+                name,
+                start,
+                end: is_region.then_some(end),
+            })
+            .collect()
     }
 
     fn master(&self) -> TrackId {
-        TrackId(Guid(0))
+        TrackId(raw::track_guid(self.low(), raw::master(self.low())))
     }
 
     fn tracks(&self) -> Vec<TrackInfo> {
-        Vec::new()
+        raw::tracks(self.low())
+            .into_iter()
+            .map(|t| self.track_info(t))
+            .collect()
     }
 
-    fn track(&self, _: TrackId) -> Result<TrackInfo> {
-        Err(later("0005"))
+    fn track(&self, id: TrackId) -> Result<TrackInfo> {
+        self.find_track(id).map(|t| self.track_info(t))
     }
 
     fn add_track(&mut self, _: NewTrack) -> Result<TrackId> {
@@ -276,20 +389,39 @@ impl Session for Live {
         Err(later("0006"))
     }
 
-    fn fx(&self, _: FxId) -> Result<(TrackId, FxInfo)> {
-        Err(later("0005"))
+    fn fx(&self, id: FxId) -> Result<(TrackId, FxInfo)> {
+        let (t, i) = self.find_fx(id)?;
+        Ok((TrackId(raw::track_guid(self.low(), t)), self.fx_info(t, i)))
     }
 
-    fn params(&self, _: FxId) -> Result<Vec<ParamInfo>> {
-        Err(later("0005"))
+    fn params(&self, id: FxId) -> Result<Vec<ParamInfo>> {
+        let (t, fx) = self.find_fx(id)?;
+        let r = self.low();
+        Ok((0..raw::param_count(r, t, fx))
+            .map(|p| ParamInfo {
+                index: u32::try_from(p).unwrap_or(0),
+                name: raw::param_name(r, t, fx, p),
+                value: raw::param_value(r, t, fx, p),
+                display: raw::param_display(r, t, fx, p),
+                steps: raw::param_is_toggle(r, t, fx, p).then_some(2),
+            })
+            .collect())
     }
 
     fn set_param(&mut self, _: FxId, _: u32, _: f64) -> Result<()> {
         Err(later("0006"))
     }
 
-    fn format_param(&self, _: FxId, _: u32, _: f64) -> Result<Option<String>> {
-        Err(later("0005"))
+    fn format_param(&self, id: FxId, index: u32, value: f64) -> Result<Option<String>> {
+        let (t, fx) = self.find_fx(id)?;
+        let p = self.param_index(t, fx, id, index)?;
+        Ok(raw::param_format(
+            self.low(),
+            t,
+            fx,
+            p,
+            value.clamp(0.0, 1.0),
+        ))
     }
 
     fn fx_state(&self, _: FxId) -> Result<String> {
@@ -324,8 +456,24 @@ impl Session for Live {
         Err(later("0007"))
     }
 
-    fn items(&self, _: TrackId) -> Result<Vec<ItemInfo>> {
-        Err(later("0005"))
+    fn items(&self, id: TrackId) -> Result<Vec<ItemInfo>> {
+        let t = self.find_track(id)?;
+        let r = self.low();
+        let mut items: Vec<ItemInfo> = raw::items(r, t)
+            .into_iter()
+            .filter_map(|i| {
+                let take = raw::active_take(r, i);
+                Some(ItemInfo {
+                    id: ItemId(raw::item_guid(r, i)?),
+                    take: take.and_then(|k| raw::take_guid(r, k)).map(TakeId),
+                    position: raw::item_value(r, i, "D_POSITION"),
+                    length: raw::item_value(r, i, "D_LENGTH"),
+                    midi: take.is_some_and(|k| raw::take_is_midi(r, k)),
+                })
+            })
+            .collect();
+        items.sort_by(|a, b| a.position.total_cmp(&b.position));
+        Ok(items)
     }
 
     fn add_midi_item(&mut self, _: TrackId, _: f64, _: f64) -> Result<ItemId> {
