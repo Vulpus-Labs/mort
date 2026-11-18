@@ -12,3 +12,12 @@ crate-type = ["cdylib", "rlib"]
 
 [lints]
 workspace = true
+
+[dependencies]
+mort-proto.workspace = true
+mort-session = { path = "../mort-session" }
+serde.workspace = true
+serde_json.workspace = true
+reaper-low = { git = "https://github.com/helgoboss/reaper-rs.git", rev = "bd7cbb0b83f8f84c0f325557be0ca16bca458b14" }
+reaper-medium = { git = "https://github.com/helgoboss/reaper-rs.git", rev = "bd7cbb0b83f8f84c0f325557be0ca16bca458b14" }
+reaper-macros = { git = "https://github.com/helgoboss/reaper-rs.git", rev = "bd7cbb0b83f8f84c0f325557be0ca16bca458b14" }

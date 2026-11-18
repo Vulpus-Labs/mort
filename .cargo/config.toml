@@ -1,0 +1,3 @@
+[net]
+# reaper-rs pulls WDL as a submodule; libgit2 stalls on it.
+git-fetch-with-cli = true
