@@ -11,5 +11,14 @@ publish.workspace = true
 name = "mort"
 path = "src/main.rs"
 
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+mort-proto.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+mort-bridge = { path = "../mort-bridge" }
+mort-session = { path = "../mort-session" }
+
 [lints]
 workspace = true
