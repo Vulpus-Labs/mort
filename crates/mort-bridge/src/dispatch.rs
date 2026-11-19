@@ -542,7 +542,7 @@ impl<S: Session> Dispatcher<S> {
         }
         let ep: EditParams = parse(method, params.clone())?;
         let label = ep.summary.unwrap_or_else(|| method.to_owned());
-        let mut v = self.edit(session, ep.expect_state, &label, |d, s| {
+        let mut v = self.edit(session, ep.expect_state, &label, true, |d, s| {
             d.run(s, method, params)
         })?;
         if let Value::Object(o) = &mut v {
@@ -620,6 +620,7 @@ impl<S: Session> Dispatcher<S> {
         session: &mut S,
         expect_state: Option<u64>,
         label: &str,
+        may_queue: bool,
         body: impl FnOnce(&mut Self, &mut S) -> Result<Value, ErrorObject>,
     ) -> Result<Value, ErrorObject> {
         if self.held {
@@ -645,16 +646,16 @@ impl<S: Session> Dispatcher<S> {
         let result = body(self, session);
         let changed = session.state() != opened;
         session.end_undo(&label);
-        let result = if self.next_job == jobs_before {
+        let result = if may_queue || self.next_job == jobs_before {
             result
         } else {
-            // An edit may not start a job; undo the queueing.
+            // A batch may not start a job; undo the queueing.
             for id in jobs_before..self.next_job {
                 self.jobs.remove(&id);
                 self.queue.retain(|q| *q != id);
             }
             Err(invalid(
-                "an edit cannot start a job",
+                "a batch cannot start a job",
                 "send play, render and measure on their own",
             ))
         };
@@ -701,7 +702,7 @@ impl<S: Session> Dispatcher<S> {
         };
         if edits {
             let label = p.summary.clone().unwrap_or_else(|| "batch".to_owned());
-            self.edit(session, p.expect_state, &label, run_all)
+            self.edit(session, p.expect_state, &label, false, run_all)
         } else {
             let jobs_before = self.next_job;
             let r = run_all(self, session);

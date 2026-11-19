@@ -102,3 +102,99 @@ pub struct Frame {
 
 const _: () = assert!(std::mem::size_of::<Frame>() == FRAME_BYTES);
 const _: () = assert!(std::mem::align_of::<Frame>() == 4);
+
+impl Frame {
+    /// The frame as little-endian bytes, fields in declaration order: the
+    /// sidecar format of ADR 0006 §6.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; FRAME_BYTES] {
+        let mut out = [0u8; FRAME_BYTES];
+        let words = [self.index, self.len, self.end_offset]
+            .into_iter()
+            .chain(self.floats().map(f32::to_bits));
+        for (chunk, w) in out.chunks_exact_mut(4).zip(words) {
+            chunk.copy_from_slice(&w.to_le_bytes());
+        }
+        out
+    }
+
+    /// A frame from [`Frame::to_le_bytes`].
+    #[must_use]
+    pub fn from_le_bytes(bytes: &[u8; FRAME_BYTES]) -> Frame {
+        let mut words = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+        let mut next = || words.next().unwrap_or(0);
+        let mut f = Frame {
+            index: next(),
+            len: next(),
+            end_offset: next(),
+            ..Frame::default()
+        };
+        for v in f.floats_mut() {
+            *v = f32::from_bits(next());
+        }
+        f
+    }
+
+    fn floats(&self) -> impl Iterator<Item = f32> + '_ {
+        [
+            self.momentary_lufs,
+            self.short_term_lufs,
+            self.sample_peak_dbfs,
+            self.true_peak_dbtp,
+            self.rms_dbfs,
+            self.crest_db,
+            self.correlation,
+            self.correlation_low,
+            self.centroid_hz,
+            self.flatness,
+            self.onset,
+        ]
+        .into_iter()
+        .chain(self.mid_bands)
+        .chain(self.side_octaves)
+    }
+
+    fn floats_mut(&mut self) -> impl Iterator<Item = &mut f32> {
+        [
+            &mut self.momentary_lufs,
+            &mut self.short_term_lufs,
+            &mut self.sample_peak_dbfs,
+            &mut self.true_peak_dbtp,
+            &mut self.rms_dbfs,
+            &mut self.crest_db,
+            &mut self.correlation,
+            &mut self.correlation_low,
+            &mut self.centroid_hz,
+            &mut self.flatness,
+            &mut self.onset,
+        ]
+        .into_iter()
+        .chain(self.mid_bands.iter_mut())
+        .chain(self.side_octaves.iter_mut())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_round_trip() {
+        let mut f = Frame {
+            index: 7,
+            len: 2400,
+            end_offset: 13,
+            momentary_lufs: -23.5,
+            onset: 0.25,
+            ..Frame::default()
+        };
+        f.mid_bands[30] = 1.5;
+        f.side_octaves[9] = -2.0;
+        let b = f.to_le_bytes();
+        assert_eq!(&b[..4], &7u32.to_le_bytes());
+        assert_eq!(&b[216..], &(-2.0f32).to_bits().to_le_bytes());
+        assert_eq!(Frame::from_le_bytes(&b), f);
+    }
+}

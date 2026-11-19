@@ -9,3 +9,9 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+mort-proto.workspace = true
+mort-features = { path = "../mort-features" }
+serde.workspace = true
+serde_json.workspace = true

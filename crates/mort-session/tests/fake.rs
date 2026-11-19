@@ -1,10 +1,16 @@
 //! `FakeSession` behaves as the bridge expects REAPER to (ADR 0011 §1).
 
 #![expect(clippy::float_cmp, reason = "values compared are stored, not computed")]
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "test fixtures"
+)]
 
 use mort_proto::model::{ControlChange, EnvelopePoint, EnvelopeTarget, Note, Shape};
 use mort_proto::{ErrorKind, Guid, TrackId};
-use mort_session::{FakeSession, NewTrack, SendChange, Session, TrackChange};
+use mort_session::{FakeSession, NewTrack, SendChange, Session, Source, TrackChange};
 
 fn track(s: &mut FakeSession, name: &str) -> TrackId {
     s.add_track(NewTrack {
@@ -443,4 +449,130 @@ fn regions_and_tempo() {
     assert_eq!(names, ["verse", "chorus", "drop"]);
     let pos: mort_proto::Position = "9.1".parse().unwrap();
     assert_eq!(pos.resolve(s.tempo_map(), None, "9.1").unwrap(), 16.0);
+}
+
+fn probe(s: &mut FakeSession, t: mort_proto::TrackId) -> u32 {
+    let fx = s.add_fx(t, "CLAP: mort probe (Vulpus Labs)", None).unwrap();
+    let p = s.params(fx).unwrap();
+    assert_eq!(p[1].display, "1.00", "attached");
+    p[0].display.parse::<f64>().unwrap() as u32
+}
+
+fn mean_rms(frames: &[mort_link::Record]) -> f32 {
+    let n = frames.len() as f32;
+    frames.iter().map(|r| r.frame.rms_dbfs).sum::<f32>() / n
+}
+
+#[test]
+fn renders_feed_probes_through_the_real_feature_code() {
+    let mut s = FakeSession::new();
+    let drums = s
+        .add_track(NewTrack {
+            name: "Drums".into(),
+            ..NewTrack::default()
+        })
+        .unwrap();
+    let kick = s
+        .add_track(NewTrack {
+            name: "Kick".into(),
+            parent: Some(drums),
+            ..NewTrack::default()
+        })
+        .unwrap();
+    s.add_sound(kick, Source::Sine { hz: 60.0, db: -6.0 }, None)
+        .unwrap();
+    let ks = probe(&mut s, kick);
+    let ds = probe(&mut s, drums);
+    let master = s.master();
+    let ms = probe(&mut s, master);
+    assert!(ks > 0 && ds != ks && ms != ds);
+    s.set_track(
+        kick,
+        &TrackChange {
+            volume: Some(0.5),
+            ..TrackChange::default()
+        },
+    )
+    .unwrap();
+
+    let run = s.begin_run();
+    s.render(1.0, 3.0).unwrap();
+    s.end_run(run);
+    let mut frames = s.take_frames(run);
+    assert!(s.take_frames(run).is_empty(), "taking empties the buffers");
+    let k = frames.remove(&ks).unwrap();
+    // 2 s at 20 frames a second, plus the render's tail of 3 frames.
+    assert_eq!(k.len(), 43);
+    assert!((k[0].start - 1.0).abs() < 1e-9 && (k[1].start - 1.05).abs() < 1e-9);
+    assert!(k.iter().all(|r| r.run == run));
+    // The kick's probe is pre-fader: a -6 dB peak sine reads -9 dB RMS.
+    assert!(
+        (mean_rms(&k[5..]) + 9.03).abs() < 0.1,
+        "{}",
+        mean_rms(&k[5..])
+    );
+    // The folder hears the kick after its fader, 6 dB down.
+    let d = frames.remove(&ds).unwrap();
+    assert!(
+        (mean_rms(&d[5..]) + 15.05).abs() < 0.1,
+        "{}",
+        mean_rms(&d[5..])
+    );
+    assert!(frames.contains_key(&ms));
+}
+
+#[test]
+fn eq_mute_and_stopped_playback() {
+    let mut s = FakeSession::new();
+    let t = s
+        .add_track(NewTrack {
+            name: "Pad".into(),
+            ..NewTrack::default()
+        })
+        .unwrap();
+    s.add_sound(
+        t,
+        Source::Sine {
+            hz: 1000.0,
+            db: -12.0,
+        },
+        Some((0.0, 1.0)),
+    )
+    .unwrap();
+    let eq = s.add_fx(t, "ReaEQ", None).unwrap();
+    s.set_param(eq, 0, (1000f64 / 20.0).ln() / 1000f64.ln())
+        .unwrap();
+    s.set_param(eq, 1, 0.75).unwrap(); // +12 dB
+    let slot = probe(&mut s, t);
+
+    let run = s.begin_run();
+    s.render(0.0, 2.0).unwrap();
+    let f = s.take_frames(run).remove(&slot).unwrap();
+    // Boosted 12 dB while the sine plays, silent after.
+    assert!(
+        (mean_rms(&f[5..18]) + 3.01).abs() < 0.2,
+        "{}",
+        mean_rms(&f[5..18])
+    );
+    assert!(f[25..].iter().all(|r| r.frame.rms_dbfs <= -149.0));
+
+    let run = s.begin_run();
+    s.play(0.0, 4.0).unwrap();
+    s.advance_by(1.0);
+    s.stop();
+    let f = s.take_frames(run).remove(&slot).unwrap();
+    assert_eq!(f.len(), 20, "only what played");
+
+    // REAPER does not run a muted track's FX, so its probe is silent.
+    s.set_track(
+        t,
+        &TrackChange {
+            mute: Some(true),
+            ..TrackChange::default()
+        },
+    )
+    .unwrap();
+    let run = s.begin_run();
+    s.render(0.0, 1.0).unwrap();
+    assert!(!s.take_frames(run).contains_key(&slot));
 }

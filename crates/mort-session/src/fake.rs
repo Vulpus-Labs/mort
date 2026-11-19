@@ -9,7 +9,11 @@
 //! Plugins come from a catalogue of [`PluginSpec`]s. Parameter display text
 //! is the parameter's real value with its unit.
 
+use std::collections::{HashMap, HashSet};
+
 use serde::Serialize;
+
+use mort_link::Record;
 
 use mort_proto::model::{
     ControlChange, EnvelopeInfo, EnvelopePoint, EnvelopeTarget, FxInfo, ItemInfo, Note, ParamInfo,
@@ -17,7 +21,21 @@ use mort_proto::model::{
 };
 use mort_proto::{EnvelopeId, FxId, Guid, ItemId, SteppedTempoMap, TakeId, TempoMap, TrackId};
 
+use crate::audio::{self, Biquad, Source};
 use crate::{NewTrack, Result, SendChange, Session, TrackChange, invalid, not_found};
+
+/// How far past a range's end the fake renders, as REAPER does (ADR 0006
+/// §5).
+const RENDER_TAIL: f64 = 0.15;
+
+/// The block size the fake's probes are fed in.
+const PROBE_BLOCK: usize = 512;
+
+/// The probe's plugin name in the catalogue.
+const PROBE: &str = "CLAP: mort probe (Vulpus Labs)";
+
+/// The EQ the fake applies to audio.
+const REAEQ: &str = "VST: ReaEQ (Cockos)";
 
 /// The largest linear gain a volume can take: +12 dB, as in REAPER.
 const MAX_GAIN: f64 = 3.981_071_705_534_973;
@@ -177,6 +195,13 @@ struct FakeItem {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct Sound {
+    source: Source,
+    from: f64,
+    to: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct FakeTrack {
     id: TrackId,
     name: String,
@@ -190,6 +215,7 @@ struct FakeTrack {
     fx: Vec<FakeFx>,
     envelopes: Vec<FakeEnvelope>,
     items: Vec<FakeItem>,
+    sounds: Vec<Sound>,
 }
 
 impl FakeTrack {
@@ -207,6 +233,7 @@ impl FakeTrack {
             fx: vec![],
             envelopes: vec![],
             items: vec![],
+            sounds: vec![],
         }
     }
 }
@@ -236,6 +263,11 @@ pub struct FakeSession {
     saved_to: Vec<String>,
     saved_state: u64,
     renders: Vec<(f64, f64)>,
+    path: Option<String>,
+    next_slot: u32,
+    run: u64,
+    next_run: u64,
+    frames: Vec<(u32, Record)>,
 }
 
 impl Default for FakeSession {
@@ -282,7 +314,52 @@ impl FakeSession {
             saved_to: vec![],
             saved_state: 1,
             renders: vec![],
+            path: None,
+            next_slot: 1,
+            run: 0,
+            next_run: 1,
+            frames: vec![],
         }
+    }
+
+    /// Sets the project file, as if the person had saved the project there.
+    pub fn set_path(&mut self, path: Option<&str>) {
+        self.path = path.map(str::to_owned);
+        if let Some(p) = path {
+            self.name = std::path::Path::new(p)
+                .file_stem()
+                .map_or_else(|| "untitled".into(), |s| s.to_string_lossy().into_owned());
+        }
+        self.saved_state = self.state;
+    }
+
+    /// Adds a test signal to a track, over `span` or always. Counts as a
+    /// change, like an edit to the track's items would.
+    ///
+    /// # Errors
+    ///
+    /// `not_found` for the track.
+    pub fn add_sound(
+        &mut self,
+        track: TrackId,
+        source: Source,
+        span: Option<(f64, f64)>,
+    ) -> Result<()> {
+        let (from, to) = span.unwrap_or((f64::MIN, f64::MAX));
+        self.get_mut(track)?.sounds.push(Sound { source, from, to });
+        self.changed();
+        Ok(())
+    }
+
+    /// Removes a track's test signals. Counts as a change.
+    ///
+    /// # Errors
+    ///
+    /// `not_found` for the track.
+    pub fn clear_sounds(&mut self, track: TrackId) -> Result<()> {
+        self.get_mut(track)?.sounds.clear();
+        self.changed();
+        Ok(())
     }
 
     /// Replaces the tempo map. Counts as a change.
@@ -555,7 +632,7 @@ impl Session for FakeSession {
             .fold(0.0, f64::max);
         ProjectInfo {
             name: self.name.clone(),
-            path: None,
+            path: self.path.clone(),
             sample_rate: self.sample_rate,
             length,
             dirty: self.state != self.saved_state,
@@ -741,6 +818,13 @@ impl Session for FakeSession {
         Ok(serde_json::to_string(t).expect("fake tracks serialise"))
     }
 
+    fn audio_chunk(&self, id: TrackId) -> Result<String> {
+        let mut t = self.get(id)?.clone();
+        t.name.clear();
+        t.fx.retain(|f| f.plugin != PROBE);
+        Ok(serde_json::to_string(&t).expect("fake tracks serialise"))
+    }
+
     fn add_fx(&mut self, track: TrackId, plugin: &str, index: Option<usize>) -> Result<FxId> {
         let spec = self
             .plugins
@@ -756,6 +840,12 @@ impl Session for FakeSession {
                 )
             })?;
         let id = FxId(self.fresh());
+        let mut values: Vec<f64> = spec.params.iter().map(|p| p.default).collect();
+        if spec.name == PROBE {
+            // An attached probe shows its slot (ADR 0005 §5).
+            values = vec![f64::from(self.next_slot) / 65_535.0, 1.0];
+            self.next_slot += 1;
+        }
         let t = self.get_mut(track)?;
         let index = index.unwrap_or(t.fx.len());
         if index > t.fx.len() {
@@ -774,7 +864,7 @@ impl Session for FakeSession {
                 id,
                 plugin: spec.name.clone(),
                 enabled: true,
-                values: spec.params.iter().map(|p| p.default).collect(),
+                values,
                 state_tag: 0,
             },
         );
@@ -1138,17 +1228,25 @@ impl Session for FakeSession {
         check_range(start, end)?;
         self.playing = Some((start, end));
         self.position = start;
+        // Probes hear the whole range now; frames past where playback
+        // stops are dropped when it stops.
+        self.synthesize(start, end);
         Ok(())
     }
 
     fn render(&mut self, start: f64, end: f64) -> Result<()> {
         check_range(start, end)?;
         self.renders.push((start, end));
+        self.synthesize(start, end);
         Ok(())
     }
 
     fn stop(&mut self) {
-        self.playing = None;
+        if self.playing.take().is_some() {
+            let (run, at) = (self.run, self.position);
+            self.frames
+                .retain(|(_, r)| r.run != run || r.start + 0.05 <= at);
+        }
     }
 
     fn is_playing(&self) -> bool {
@@ -1157,5 +1255,191 @@ impl Session for FakeSession {
 
     fn position(&self) -> f64 {
         self.position
+    }
+
+    fn begin_run(&mut self) -> u64 {
+        self.run = self.next_run;
+        self.next_run += 1;
+        self.run
+    }
+
+    fn end_run(&mut self, run: u64) {
+        if self.run == run {
+            self.run = 0;
+        }
+    }
+
+    fn take_frames(&mut self, run: u64) -> HashMap<u32, Vec<Record>> {
+        let mut out: HashMap<u32, Vec<Record>> = HashMap::new();
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.frames)
+            .into_iter()
+            .partition(|(_, r)| r.run == run);
+        self.frames = rest;
+        for (slot, r) in mine {
+            out.entry(slot).or_default().push(r);
+        }
+        out
+    }
+}
+
+/// Left and right gains for a pan, as a balance control.
+fn balance(pan: f64) -> (f64, f64) {
+    ((1.0 - pan).min(1.0), (1.0 + pan).min(1.0))
+}
+
+impl FakeSession {
+    /// Runs the project's audio from `start` to a little past `end` and
+    /// feeds every enabled probe's input to the real feature code, keeping
+    /// the frames under the current run (ADR 0011 §2).
+    fn synthesize(&mut self, start: f64, end: f64) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "test ranges are short"
+        )]
+        let n = ((end + RENDER_TAIL - start) * self.sample_rate).round() as usize;
+        let mut graph = Graph {
+            start,
+            n,
+            done: HashMap::new(),
+            visiting: HashSet::new(),
+            taps: vec![],
+        };
+        for t in self.all_tracks() {
+            graph.out(self, t.id);
+        }
+        let rate = self.sample_rate;
+        for (slot, [l, r]) in graph.taps {
+            let mut a = mort_features::Analyzer::new(rate, PROBE_BLOCK)
+                .expect("the fake's rate is supported");
+            #[expect(clippy::cast_possible_truncation, reason = "audio to f32")]
+            let (l, r): (Vec<f32>, Vec<f32>) = (
+                l.iter().map(|v| *v as f32).collect(),
+                r.iter().map(|v| *v as f32).collect(),
+            );
+            for (b, (lb, rb)) in l.chunks(PROBE_BLOCK).zip(r.chunks(PROBE_BLOCK)).enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
+                let pos = start + (b * PROBE_BLOCK) as f64 / rate;
+                let run = self.run;
+                let frames = &mut self.frames;
+                a.process(lb, rb, |f| {
+                    frames.push((
+                        slot,
+                        Record {
+                            run,
+                            start: pos + (f64::from(f.end_offset) - f64::from(f.len)) / rate,
+                            frame: *f,
+                        },
+                    ));
+                });
+            }
+        }
+    }
+}
+
+/// One pass of the fake's mixer.
+struct Graph {
+    start: f64,
+    n: usize,
+    done: HashMap<TrackId, [Vec<f64>; 2]>,
+    visiting: HashSet<TrackId>,
+    taps: Vec<(u32, [Vec<f64>; 2])>,
+}
+
+impl Graph {
+    /// A track's audio after its fader, working out its inputs first.
+    fn out(&mut self, sess: &FakeSession, id: TrackId) -> [Vec<f64>; 2] {
+        if let Some(v) = self.done.get(&id) {
+            return v.clone();
+        }
+        let silent = [vec![0.0; self.n], vec![0.0; self.n]];
+        // REAPER refuses routing loops; the fake just breaks them.
+        if !self.visiting.insert(id) {
+            return silent;
+        }
+        let Ok(track) = sess.get(id) else {
+            return silent;
+        };
+        // REAPER does not process muted tracks by default: no FX run, so
+        // no probe hears them.
+        if track.mute {
+            self.visiting.remove(&id);
+            self.done.insert(id, silent.clone());
+            return silent;
+        }
+        let rate = sess.sample_rate;
+        let mut mono = vec![0.0; self.n];
+        let notes: Vec<Note> = track.items.iter().flat_map(|i| i.notes.clone()).collect();
+        for (k, snd) in track.sounds.iter().enumerate() {
+            let seed = u64::try_from(id.0.0 & u128::from(u64::MAX)).unwrap_or(1)
+                ^ (k as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            audio::add(
+                &mut mono,
+                self.start,
+                rate,
+                &snd.source,
+                (snd.from, snd.to),
+                seed,
+                &notes,
+            );
+        }
+        let mut left = mono.clone();
+        let mut right = mono;
+        let master = sess.project.master.id;
+        let mut inputs: Vec<(TrackId, f64, f64)> = vec![];
+        for u in &sess.project.tracks {
+            let feeds = if id == master {
+                u.parent.is_none()
+            } else {
+                u.parent == Some(id)
+            };
+            if u.main_send && feeds {
+                inputs.push((u.id, 1.0, 0.0));
+            }
+            for send in u.sends.iter().filter(|x| x.dest == id && !x.mute) {
+                inputs.push((u.id, send.volume, send.pan));
+            }
+        }
+        for (u, g, p) in inputs {
+            let [ul, ur] = self.out(sess, u);
+            let (gl, gr) = balance(p);
+            for i in 0..self.n {
+                left[i] += ul[i] * g * gl;
+                right[i] += ur[i] * g * gr;
+            }
+        }
+        for fx in track.fx.iter().filter(|f| f.enabled) {
+            if fx.plugin == PROBE {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "slots are small"
+                )]
+                let slot = (fx.values[0] * 65_535.0).round() as u32;
+                self.taps.push((slot, [left.clone(), right.clone()]));
+            } else if fx.plugin == REAEQ
+                && let Some(spec) = sess.plugins.iter().find(|p| p.name == REAEQ)
+            {
+                let real = |i: usize| spec.params[i].real(fx.values[i]);
+                let band = Biquad::peak(real(0), rate, real(2), real(1));
+                for ch in [&mut left, &mut right] {
+                    let mut filter = band;
+                    for v in ch.iter_mut() {
+                        *v = filter.run(*v);
+                    }
+                }
+            }
+        }
+        let (gl, gr) = balance(track.pan);
+        let gain = track.volume;
+        for x in &mut left {
+            *x *= gain * gl;
+        }
+        for x in &mut right {
+            *x *= gain * gr;
+        }
+        self.visiting.remove(&id);
+        self.done.insert(id, [left.clone(), right.clone()]);
+        [left, right]
     }
 }

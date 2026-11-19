@@ -21,6 +21,17 @@ CLI parsing are pure logic.
    Rendering a range runs the real `mort-features` code over them and
    feeds the real capture path, so the measurement and findings pipeline
    runs from start to finish in `cargo test`.
+   - The fake mixes as REAPER does: folders sum their children, sends
+     add after the sender's fader, the master sums the top level, and
+     each probe hears its chain at the point where it sits. ReaEQ's band
+     is applied as a peaking filter, so EQ moves change the measurements.
+     Muted tracks are not processed.
+   - It renders 150 ms past a range's end, as REAPER does (ADR 0006 §5).
+   - Run ids and frames go through `Session` (`begin_run`, `end_run`,
+     `take_frames`). In REAPER these use the shared run atomic and the
+     probe rings. The fake keeps its own, so tests in one process do not
+     share runs. Only the ring itself is left out, and `mort-link` tests
+     it.
 3. **Features are tested against references:**
    - loudness against the EBU Tech 3341 and 3342 test signals;
    - true peak against the BS.1770 test signals;

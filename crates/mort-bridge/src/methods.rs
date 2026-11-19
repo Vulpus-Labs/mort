@@ -17,12 +17,12 @@ use mort_link::Slot;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
-fn parse<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, ErrorObject> {
+pub(crate) fn parse<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, ErrorObject> {
     let params = if params.is_null() { json!({}) } else { params };
     serde_json::from_value(params).map_err(|e| ErrorObject::invalid_params(method, &e.to_string()))
 }
 
-fn read<S, P: DeserializeOwned>(
+pub(crate) fn read<S, P: DeserializeOwned>(
     d: &mut Dispatcher<S>,
     name: &'static str,
     f: impl Fn(&S, P) -> Result<Value, ErrorObject> + 'static,
@@ -39,7 +39,7 @@ fn read<S, P: DeserializeOwned>(
 }
 
 #[derive(Deserialize)]
-struct NoParams {}
+pub(crate) struct NoParams {}
 
 #[derive(Deserialize)]
 struct TrackParams {
@@ -547,7 +547,7 @@ struct RangeParams {
     end: f64,
 }
 
-fn check_range(start: f64, end: f64) -> Result<(), ErrorObject> {
+pub(crate) fn check_range(start: f64, end: f64) -> Result<(), ErrorObject> {
     if end > start {
         Ok(())
     } else {
@@ -568,7 +568,7 @@ struct PlayJob {
 
 impl<S: Session> Job<S> for PlayJob {
     fn start(&mut self, s: &mut S) -> Result<(), ErrorObject> {
-        self.run = runs::begin();
+        self.run = s.begin_run();
         s.play(self.start, self.end)
     }
 
@@ -581,7 +581,7 @@ impl<S: Session> Job<S> for PlayJob {
         if !stopped {
             s.stop();
         }
-        runs::end(self.run);
+        s.end_run(self.run);
         JobPoll::Done(json!({
             "run": self.run,
             "start": self.start,
@@ -593,7 +593,7 @@ impl<S: Session> Job<S> for PlayJob {
 
     fn cancel(&mut self, s: &mut S) {
         s.stop();
-        runs::end(self.run);
+        s.end_run(self.run);
     }
 }
 
@@ -607,12 +607,12 @@ struct RenderJob {
 
 impl<S: Session> Job<S> for RenderJob {
     fn start(&mut self, s: &mut S) -> Result<(), ErrorObject> {
-        self.run = runs::begin();
+        self.run = s.begin_run();
         let t = std::time::Instant::now();
         // REAPER renders inside this call, holding the main thread.
         let r = s.render(self.start, self.end);
         self.seconds = t.elapsed().as_secs_f64();
-        runs::end(self.run);
+        s.end_run(self.run);
         r
     }
 
@@ -667,7 +667,7 @@ pub fn register_transport<S: Session + 'static>(d: &mut Dispatcher<S>) {
 /// The probe as REAPER names it.
 pub const PROBE_PLUGIN: &str = "CLAP: mort probe (Vulpus Labs)";
 
-fn is_probe(fx: &mort_proto::model::FxInfo) -> bool {
+pub(crate) fn is_probe(fx: &mort_proto::model::FxInfo) -> bool {
     fx.plugin.contains("mort probe")
 }
 
@@ -688,7 +688,7 @@ struct ProbesPeek {
 }
 
 /// The slot a probe shows in its `slot` parameter, if it has one.
-fn probe_slot<S: Session>(s: &S, fx: mort_proto::FxId) -> Option<u32> {
+pub(crate) fn probe_slot<S: Session>(s: &S, fx: mort_proto::FxId) -> Option<u32> {
     let p = s.params(fx).ok()?.into_iter().find(|p| p.name == "slot")?;
     let v: f64 = p.display.trim().parse().ok()?;
     #[expect(
@@ -698,6 +698,56 @@ fn probe_slot<S: Session>(s: &S, fx: mort_proto::FxId) -> Option<u32> {
     )]
     let id = v.round() as u32;
     (id > 0).then_some(id)
+}
+
+/// What [`ensure_probes`] did.
+pub struct Ensured {
+    /// Probes added.
+    pub added: usize,
+    /// Probes moved to the end of their chain.
+    pub moved: usize,
+    /// Extra probes removed.
+    pub removed: usize,
+    /// The probe on each track.
+    pub probes: Vec<(TrackId, FxId)>,
+}
+
+/// Makes sure each of `targets` has exactly one probe, last in its chain
+/// (ADR 0005 §1).
+///
+/// # Errors
+///
+/// A track that does not exist, or REAPER failing to add the probe.
+pub fn ensure_probes<S: Session>(s: &mut S, targets: &[TrackId]) -> Result<Ensured, ErrorObject> {
+    let mut e = Ensured {
+        added: 0,
+        moved: 0,
+        removed: 0,
+        probes: Vec::new(),
+    };
+    for &t in targets {
+        let info = s.track(t)?;
+        let probes: Vec<_> = info.fx.iter().filter(|f| is_probe(f)).collect();
+        let keep = match probes.first() {
+            None => {
+                e.added += 1;
+                s.add_fx(t, PROBE_PLUGIN, None)?
+            }
+            Some(first) => first.id,
+        };
+        for extra in probes.iter().skip(1) {
+            s.remove_fx(extra.id)?;
+            e.removed += 1;
+        }
+        let chain = s.track(t)?.fx;
+        let last = chain.len() - 1;
+        if chain.iter().position(|f| f.id == keep) != Some(last) {
+            s.move_fx(keep, last)?;
+            e.moved += 1;
+        }
+        e.probes.push((t, keep));
+    }
+    Ok(e)
 }
 
 /// Registers `probes.ensure`, `probes.list` and `probes.peek` (ticket 0011).
@@ -710,31 +760,13 @@ pub fn register_probes<S: Session + 'static>(d: &mut Dispatcher<S>) {
         if p.master && !targets.contains(&s.master()) {
             targets.push(s.master());
         }
-        let (mut added, mut moved, mut removed) = (0, 0, 0);
-        let mut out = Vec::new();
-        for t in targets {
-            let info = s.track(t)?;
-            let probes: Vec<_> = info.fx.iter().filter(|f| is_probe(f)).collect();
-            let keep = match probes.first() {
-                None => {
-                    added += 1;
-                    s.add_fx(t, PROBE_PLUGIN, None)?
-                }
-                Some(first) => first.id,
-            };
-            for extra in probes.iter().skip(1) {
-                s.remove_fx(extra.id)?;
-                removed += 1;
-            }
-            let chain = s.track(t)?.fx;
-            let last = chain.len() - 1;
-            if chain.iter().position(|f| f.id == keep) != Some(last) {
-                s.move_fx(keep, last)?;
-                moved += 1;
-            }
-            out.push(json!({ "track": t, "fx": keep }));
-        }
-        Ok(json!({ "probes": out, "added": added, "moved": moved, "removed": removed }))
+        let e = ensure_probes(s, &targets)?;
+        let out: Vec<Value> = e
+            .probes
+            .iter()
+            .map(|(t, fx)| json!({ "track": t, "fx": fx }))
+            .collect();
+        Ok(json!({ "probes": out, "added": e.added, "moved": e.moved, "removed": e.removed }))
     });
     read(d, "probes.list", |s: &S, _: NoParams| {
         let counts = probes::counts();

@@ -7,6 +7,7 @@ mod automation;
 mod client;
 mod edits;
 mod install;
+mod measure;
 mod midi;
 mod probes;
 mod resolve;
@@ -110,6 +111,13 @@ enum Command {
         #[command(subcommand)]
         action: Option<probes::ProbesCmd>,
     },
+
+    /// Measure a range into the mix map: every track, or the tracks named
+    /// with the buses they reach. Adds probes where needed.
+    Measure(measure::Measure),
+
+    /// Show what the mix map covers and what is stale.
+    Map,
 
     /// Undo mort's last edit. Refuses if the last edit was not mort's.
     Undo,
@@ -276,6 +284,8 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
         Command::Render(a) => edited(cli, |c| transport::run(c, a, true)),
         Command::Stop => edited(cli, transport::stop),
         Command::Probes { action } => edited(cli, |c| probes::run(c, action.as_ref())),
+        Command::Measure(m) => edited(cli, |c| measure::run(c, m)),
+        Command::Map => edited(cli, measure::map),
         Command::Undo => edited(cli, |c| edits::undo(c, false)),
         Command::Redo => edited(cli, |c| edits::undo(c, true)),
         Command::Fx {

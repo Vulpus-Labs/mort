@@ -17,15 +17,22 @@ longer match the project are worse than none.
    - the run's range;
    - the time it was taken;
    - the project state count;
-   - for each measured track, bus and master, a hash of its state chunk
-     (`GetTrackStateChunk`, which covers FX state, envelopes, items and
-     routing).
+   - for every track, bus and master in the project, a hash of its
+     *audio chunk*: its state chunk (`GetTrackStateChunk`, which covers FX
+     state, envelopes, items and routing) without its name, selection,
+     view and window lines, and without mort's probes. An FX chain left
+     empty is dropped. Renaming, selecting or adding a probe therefore
+     leaves a track fresh;
+   - for each measured track, the tracks routed into it at the time.
 2. **The mix map** is the latest capture data for each (track, time)
    point. A new capture over a range replaces older data for that range on
    the tracks it measured.
 3. **Staleness.** A track's map data is stale when its chunk hash has
    changed since capture. A bus or the master is stale when it is, or when
-   anything routed into it is. Tempo-map changes make everything stale.
+   anything routed into it is (by the routing then or now). A track
+   routed in or out since capture makes it stale. Tempo-map changes make
+   everything stale: the capture keeps a fingerprint of where each
+   sixteenth note fell up to the range's end.
    Every query result says which of its parts are stale. `mort measure
    --stale` re-measures only stale ranges and tracks.
 4. **Running a measurement:**
@@ -36,13 +43,26 @@ longer match the project are worse than none.
      written. It is the default.
    - `play` mode plays the range through the person's monitors in real
      time, for when the person wants to listen too.
+   Measuring is an edit, because it may add probes (ADR 0004): it is
+   refused while edits are held, and its undo point, if any, holds only
+   the probes it added. It is the one kind of edit that queues a job. A
+   batch still may not. REAPER does not run a muted track's FX by
+   default, so a muted track is reported as unmeasured with that reason,
+   and its old data stays, marked stale.
 5. **Clipping.** REAPER processes a few blocks past the end of a play or
    render (about 150 ms of frames for a render in REAPER 7.67). A capture
    keeps only frames that start inside its range.
 6. **Persistence.** Captures are saved in a sidecar directory next to the
-   project file, `<project>.mort/captures/`, in a compact binary format
-   with a JSON index. They reload when the project opens. An unsaved
-   project keeps its captures in memory only.
+   project file: `song.rpp` keeps them in `song.mort/captures/`. The
+   directory holds `index.json` (format version, next capture id, each
+   capture's metadata) and one `<id>.frames` file per capture, holding
+   its segments with their frames in little-endian binary (the layout is
+   in `mort_map::store`). Captures are written as they are made. When
+   the project's path changes, the bridge loads the sidecar beside the
+   new path if there is one. If there is none, it keeps its map for the
+   tracks the project still has and writes it there; this covers a first
+   save and *Save as*. An unsaved project keeps its captures in memory
+   only.
 7. **Size:** a frame is 220 bytes (ADR 0007). Five minutes of
    40 tracks is about 53 MB. Old captures that are fully replaced are
    deleted.

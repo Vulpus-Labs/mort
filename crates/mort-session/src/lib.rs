@@ -9,14 +9,19 @@
 //! All methods run on REAPER's main thread. Errors are protocol errors,
 //! ready to send to the client: they name the element and say what to do.
 
+mod audio;
 mod fake;
 
+pub use audio::Source;
 pub use fake::{FakeSession, PluginParam, PluginSpec};
 
 use mort_proto::model::{
     ControlChange, EnvelopeInfo, EnvelopePoint, EnvelopeTarget, FxInfo, ItemInfo, Note, ParamInfo,
     ProjectInfo, Region, TrackInfo,
 };
+use std::collections::HashMap;
+
+use mort_link::Record;
 use mort_proto::{EnvelopeId, ErrorKind, ErrorObject, FxId, ItemId, TempoMap, TrackId};
 
 /// What every session method returns.
@@ -134,6 +139,17 @@ pub trait Session {
     ///
     /// `not_found`.
     fn track_chunk(&self, id: TrackId) -> Result<String>;
+
+    /// The parts of the track's state chunk that affect what it sounds like
+    /// or where its audio goes: the chunk without its name, selection and
+    /// window state, and without mort's probes. Captures hash it (ADR 0006
+    /// §1), so selecting a track or adding a probe leaves its measurements
+    /// fresh.
+    ///
+    /// # Errors
+    ///
+    /// `not_found`.
+    fn audio_chunk(&self, id: TrackId) -> Result<String>;
 
     // --- FX --------------------------------------------------------------
 
@@ -372,6 +388,19 @@ pub trait Session {
 
     /// The play position, or the edit cursor when stopped.
     fn position(&self) -> f64;
+
+    // --- Runs ------------------------------------------------------------
+
+    /// Starts a run (ADR 0005 §3): frames probes produce from now on carry
+    /// its id. Returns the id.
+    fn begin_run(&mut self) -> u64;
+
+    /// Ends the run `run`, if it is still current.
+    fn end_run(&mut self, run: u64);
+
+    /// Takes the frames of run `run` that probes have produced so far, by
+    /// probe slot.
+    fn take_frames(&mut self, run: u64) -> HashMap<u32, Vec<Record>>;
 }
 
 /// A `not_found` error for an element.

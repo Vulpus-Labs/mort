@@ -60,6 +60,7 @@ impl FakeBridge {
                 mort_bridge::methods::register_midi(&mut d);
                 mort_bridge::methods::register_transport(&mut d);
                 mort_bridge::methods::register_probes(&mut d);
+                mort_bridge::measure::register_measure(&mut d);
                 let mut session = FakeSession::new();
                 setup(&mut session);
                 ready_tx.send(()).unwrap();
@@ -981,4 +982,79 @@ fn install_bundles_the_probe_dylib() {
         std::fs::read_to_string(b.join("PkgInfo")).unwrap(),
         "BNDL????"
     );
+}
+
+fn band_with_sound(s: &mut FakeSession) {
+    use mort_session::{Session, Source};
+    band(s);
+    let kick = s
+        .tracks()
+        .into_iter()
+        .find(|t| t.name == "Kick")
+        .unwrap()
+        .id;
+    s.add_sound(kick, Source::Sine { hz: 55.0, db: -6.0 }, None)
+        .unwrap();
+}
+
+#[test]
+fn measure_and_map() {
+    let b = FakeBridge::start_with("measure", band_with_sound);
+    let t = ok(&b.mort(&["map"]));
+    assert!(t.starts_with("the map is empty"), "{t}");
+
+    let o = b.mort(&["measure", "kick"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("give a range"), "{}", stderr(&o));
+
+    let t = ok(&b.mort(&["measure", "1.1..2.1"]));
+    assert!(t.starts_with("measured 0.00–2.00s by render"), "{t}");
+    assert!(t.contains("capture 1"), "{t}");
+    for name in ["MASTER", "Drums", "Kick", "Bass DI", "Verb"] {
+        assert!(
+            t.lines()
+                .any(|l| l.trim_start().starts_with(name) && l.ends_with("40")),
+            "{name} measured: {t}"
+        );
+    }
+    assert!(t.contains("not measured: Bass: it is muted"), "{t}");
+    assert!(t.contains("in memory only"), "{t}");
+
+    let t = ok(&b.mort(&["map"]));
+    assert!(t.starts_with("1 captures"), "{t}");
+    let kick = t
+        .lines()
+        .find(|l| l.trim_start().starts_with("Kick"))
+        .unwrap();
+    assert!(
+        kick.contains("0.00–2.00s") && kick.trim_end().ends_with('-'),
+        "{t}"
+    );
+
+    ok(&b.mort(&["track", "set", "kick", "--volume", "-6"]));
+    let t = ok(&b.mort(&["map"]));
+    for name in ["MASTER", "Drums", "Kick", "Verb"] {
+        let l = t
+            .lines()
+            .find(|l| l.trim_start().starts_with(name))
+            .unwrap();
+        assert!(l.contains("(Kick changed)"), "{name} stale: {t}");
+    }
+    let bass = t
+        .lines()
+        .find(|l| l.trim_start().starts_with("Bass "))
+        .unwrap();
+    assert!(bass.trim_end().ends_with('-'), "{t}");
+    assert!(t.contains("4 tracks stale"), "{t}");
+
+    let t = ok(&b.mort(&["measure", "--stale"]));
+    assert!(t.contains("capture 2"), "{t}");
+    assert!(!t.contains("Bass"), "only what was stale: {t}");
+    let t = ok(&b.mort(&["map"]));
+    assert!(
+        t.starts_with("2 captures") && !t.contains("changed)") && !t.contains("tracks stale"),
+        "{t}"
+    );
+    let t = ok(&b.mort(&["measure", "--stale"]));
+    assert!(t.starts_with("nothing is stale"), "{t}");
 }

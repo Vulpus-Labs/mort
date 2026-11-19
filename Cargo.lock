@@ -406,6 +406,7 @@ name = "mort-bridge"
 version = "0.1.0"
 dependencies = [
  "mort-link",
+ "mort-map",
  "mort-proto",
  "mort-session",
  "reaper-low",
@@ -443,6 +444,12 @@ dependencies = [
 [[package]]
 name = "mort-map"
 version = "0.1.0"
+dependencies = [
+ "mort-features",
+ "mort-proto",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "mort-probe"
@@ -466,6 +473,8 @@ dependencies = [
 name = "mort-session"
 version = "0.1.0"
 dependencies = [
+ "mort-features",
+ "mort-link",
  "mort-proto",
  "serde",
  "serde_json",

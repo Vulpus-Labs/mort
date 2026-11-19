@@ -60,7 +60,12 @@ pub fn wait(client: &mut Client, job: &Value, what: &str) -> Result<Value, Failu
     }
 }
 
-fn range(client: &mut Client, text: &str) -> Result<(f64, f64), Failure> {
+/// Converts a range such as `9.1..17.1` to seconds through the bridge.
+///
+/// # Errors
+///
+/// A bridge error, or text that is not a range.
+pub fn range(client: &mut Client, text: &str) -> Result<(f64, f64), Failure> {
     let r = client.call("time.convert", json!({ "to_seconds": [text] }))?;
     let pair = &r["seconds"][0];
     match (pair[0].as_f64(), pair[1].as_f64()) {

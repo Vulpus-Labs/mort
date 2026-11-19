@@ -105,6 +105,84 @@ pub fn replace_fx_state(chunk: &str, guid: &str, state: &str) -> Result<String, 
     Ok(text)
 }
 
+/// Keys of chunk lines that change with the view, not the sound: names,
+/// selection, sizes, window places and the MIDI editor's settings.
+const VIEW_KEYS: [&str; 17] = [
+    "NAME",
+    "SEL",
+    "TRACKHEIGHT",
+    "SHOW",
+    "LASTSEL",
+    "WNDRECT",
+    "FLOATPOS",
+    "FLOAT",
+    "DOCKED",
+    "VIS",
+    "LANEHEIGHT",
+    "CFGEDITVIEW",
+    "CFGEDIT",
+    "EVTFILTER",
+    "KEYSNAP",
+    "PEAKCOL",
+    "LAYOUTS",
+];
+
+fn is_view_line(line: &str) -> bool {
+    let key = line.split_whitespace().next().unwrap_or("");
+    VIEW_KEYS.contains(&key)
+}
+
+/// A track chunk reduced to what affects its sound and routing (ADR 0006
+/// §1): view lines dropped, mort's probes cut out of the FX chain, and an
+/// FX chain left empty dropped altogether, so adding a probe to a track
+/// with no FX changes nothing.
+///
+/// An FX's entry in the chain runs from its `BYPASS` line to the next
+/// one, or to the chain's end: the plugin's block, then lines such as
+/// `FXID` and any parameter envelopes.
+#[must_use]
+pub fn audio_chunk(chunk: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut depth = 0usize;
+    // While inside an FX chain: its depth, where it starts in `out`, and
+    // whether any FX was kept.
+    let mut chain: Option<(usize, usize, bool)> = None;
+    let mut skipping = false;
+    let lines: Vec<&str> = chunk.lines().map(str::trim_start).collect();
+    for (i, line) in lines.iter().enumerate() {
+        let at_chain = chain.is_some_and(|(d, _, _)| d == depth);
+        if at_chain && line.starts_with("BYPASS") {
+            let block = lines.get(i + 1).copied().unwrap_or("");
+            skipping = block.starts_with('<') && block.contains("mort probe");
+            if !skipping && let Some(c) = chain.as_mut() {
+                c.2 = true;
+            }
+        }
+        let closes_chain = at_chain && *line == ">";
+        if closes_chain {
+            skipping = false;
+        }
+        if line.starts_with('<') {
+            depth += 1;
+            if chain.is_none() && line.starts_with("<FXCHAIN") {
+                chain = Some((depth, out.len(), false));
+            }
+        } else if *line == ">" {
+            depth = depth.saturating_sub(1);
+        }
+        if !skipping && !is_view_line(line) {
+            out.push(line);
+        }
+        if closes_chain
+            && let Some((_, start, kept)) = chain.take()
+            && !kept
+        {
+            out.truncate(start);
+        }
+    }
+    out.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +211,23 @@ mod tests {
   >
 >
 ";
+
+    #[test]
+    fn audio_chunks_leave_out_view_state_and_probes() {
+        let a = audio_chunk(CHUNK);
+        assert!(!a.contains("NAME") && !a.contains("SHOW") && !a.contains("FLOATPOS"));
+        assert!(a.contains("ReaEQ") && a.contains("{11111111-"));
+        assert!(!a.contains("mort probe") && !a.contains("{22222222-") && !a.contains("BYPASS 1"));
+        let renamed = CHUNK.replace("NAME Bass", "NAME Bass 2");
+        assert_eq!(audio_chunk(&renamed), a);
+
+        // A chain holding only a probe is the same as no chain.
+        let only_probe = "<TRACK\nNAME K\nVOLPAN 1 0\n<FXCHAIN\nSHOW 0\nBYPASS 0 0 0\n<CLAP \"CLAP: mort probe (Vulpus Labs)\" x\n>\nFXID {2}\nWAK 0 0\n>\n>";
+        assert_eq!(
+            audio_chunk(only_probe),
+            audio_chunk("<TRACK\nNAME K\nVOLPAN 1 0\n>")
+        );
+    }
 
     #[test]
     fn finds_each_fx_block() {

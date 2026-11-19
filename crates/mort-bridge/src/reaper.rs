@@ -130,6 +130,7 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
                 crate::methods::register_midi(&mut d);
                 crate::methods::register_transport(&mut d);
                 crate::methods::register_probes(&mut d);
+                crate::measure::register_measure(&mut d);
                 d
             },
             _server: server,
@@ -880,6 +881,10 @@ impl Session for Live {
         raw::track_chunk(self.low(), t).ok_or_else(|| reaper_failed("GetTrackStateChunk", &id))
     }
 
+    fn audio_chunk(&self, id: TrackId) -> Result<String> {
+        Ok(crate::chunk::audio_chunk(&self.track_chunk(id)?))
+    }
+
     fn add_fx(&mut self, track: TrackId, plugin: &str, index: Option<usize>) -> Result<FxId> {
         let t = self.find_track(track)?;
         let r = self.low();
@@ -1399,5 +1404,17 @@ impl Session for Live {
 
     fn position(&self) -> f64 {
         raw::play_position(self.low())
+    }
+
+    fn begin_run(&mut self) -> u64 {
+        crate::runs::begin()
+    }
+
+    fn end_run(&mut self, run: u64) {
+        crate::runs::end(run);
+    }
+
+    fn take_frames(&mut self, run: u64) -> std::collections::HashMap<u32, Vec<mort_link::Record>> {
+        crate::probes::take(run)
     }
 }

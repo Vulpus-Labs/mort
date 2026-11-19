@@ -7,9 +7,11 @@
 //! - [`dispatch`]: the main-thread dispatcher, generic over
 //!   [`mort_session::Session`] so it runs over the fake in tests.
 //! - [`methods`]: the RPC methods, generic over the session.
+//! - [`measure`]: the `measure` job and the mix map it fills.
 //! - `reaper`: the extension entry point and the REAPER session.
 
 pub mod dispatch;
+pub mod measure;
 pub mod methods;
 pub mod probes;
 pub mod runs;

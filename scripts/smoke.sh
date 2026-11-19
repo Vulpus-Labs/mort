@@ -377,6 +377,43 @@ check("render across the tempo change: evenly spaced",
 probes = call("probes.list")["result"]["probes"]
 check("no frames dropped", all(p["dropped"] == 0 for p in probes), str([(p["name"], p["dropped"]) for p in probes]))
 
+# --- Measuring and the mix map (ticket 0012) --------------------------------
+def measure(params):
+    """Runs a measure to the end: (error, result)."""
+    r = call("measure", params)
+    if "error" in r:
+        return r["error"], None
+    if r["result"].get("nothing_stale"):
+        return None, r["result"]
+    done = wait_job(r["result"]["job"])
+    return (done.get("error") if done.get("state") != "done" else None), done.get("result", {})
+
+def stale_names():
+    m = call("map.status")["result"]
+    return sorted(t["name"] for t in m["tracks"] if any(s["stale"] for s in t["spans"]))
+
+e, res = measure({"start": 0.0, "end": 4.0, "summary": "smoke measure"})
+got = [(t["name"], t["frames"]) for t in (res or {}).get("measured", [])]
+skipped = [(t["name"], t["why"]) for t in (res or {}).get("unmeasured", [])]
+# Bass is muted, and REAPER does not run a muted track's FX.
+check("measure: every unmuted track and the master, 80 frames each, in project order",
+      e is None and [n for n, _ in got] == ["MASTER", "Drums", "Kick", "Verb", "Synth"]
+      and all(n == 80 for _, n in got)
+      and len(skipped) == 1 and skipped[0][0] == "Bass" and "muted" in skipped[0][1],
+      str(e or (got, skipped)))
+check("measure: the map is fresh", stale_names() == [], str(stale_names()))
+edit("track.set", {"track": bass.get("id"), "name": "Bass 2"}, "smoke rename")
+check("measure: renaming a track leaves it fresh", stale_names() == [], str(stale_names()))
+edit("track.set", {"track": kick.get("id"), "volume": 0.5}, "smoke kick down")
+want = sorted(["Kick", "Drums", "Verb", "MASTER"])
+check("measure: an edit makes the track and what it feeds stale", stale_names() == want, str(stale_names()))
+e, res = measure({"stale": True, "summary": "smoke measure stale"})
+got = sorted(t["name"] for t in (res or {}).get("measured", []))
+check("measure --stale: just those, and then all is fresh",
+      e is None and got == want and stale_names() == [], str(e or (got, stale_names())))
+e, res = measure({"stale": True})
+check("measure --stale: then nothing is stale", e is None and res.get("nothing_stale") is True, str(e or res))
+
 check("every edit left an undo point", not no_undo_point, ", ".join(no_undo_point) or "all did")
 
 # Save the smoke project's copy so REAPER can quit without asking.

@@ -17,6 +17,7 @@ workspace = true
 mort-proto.workspace = true
 mort-session = { path = "../mort-session" }
 mort-link = { path = "../mort-link" }
+mort-map = { path = "../mort-map" }
 serde.workspace = true
 serde_json.workspace = true
 reaper-low = { git = "https://github.com/helgoboss/reaper-rs.git", rev = "bd7cbb0b83f8f84c0f325557be0ca16bca458b14" }
