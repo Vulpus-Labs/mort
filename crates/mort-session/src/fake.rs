@@ -1368,13 +1368,14 @@ impl Graph {
             return silent;
         }
         let rate = sess.sample_rate;
-        let mut mono = vec![0.0; self.n];
+        let mut left = vec![0.0; self.n];
+        let mut right = vec![0.0; self.n];
         let notes: Vec<Note> = track.items.iter().flat_map(|i| i.notes.clone()).collect();
         for (k, snd) in track.sounds.iter().enumerate() {
             let seed = u64::try_from(id.0.0 & u128::from(u64::MAX)).unwrap_or(1)
                 ^ (k as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-            audio::add(
-                &mut mono,
+            audio::add_stereo(
+                [&mut left, &mut right],
                 self.start,
                 rate,
                 &snd.source,
@@ -1383,8 +1384,6 @@ impl Graph {
                 &notes,
             );
         }
-        let mut left = mono.clone();
-        let mut right = mono;
         let master = sess.project.master.id;
         let mut inputs: Vec<(TrackId, f64, f64)> = vec![];
         for u in &sess.project.tracks {

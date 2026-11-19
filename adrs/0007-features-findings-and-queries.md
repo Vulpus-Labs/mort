@@ -48,24 +48,51 @@ down from a section to a track to a band.
    - `suggest`: one sentence on the usual remedy, not an edit.
 
    Kinds in E001:
-   - `masking`: two tracks with both significant energy (within 6 dB of
-     each other and within 12 dB of the bus's level in that band) in the
-     same bands for over 30 % of a section.
+   - `masking`: two inputs of the same bus (a folder's children, or the
+     top-level tracks for the master) with both significant energy
+     (within 6 dB of each other and within 12 dB of the bus's level in
+     that band) in the same bands for over 30 % of a section, in at least
+     three third octaves.
    - `mud`: bus or master energy from 200–500 Hz more than a set amount
-     above a reference spectral tilt.
+     above the bus's own spectral tilt: a line fitted to its mean
+     third-octave levels from 63 Hz to 8 kHz, leaving out the bands under
+     test.
    - `harsh`: the same test from 2–5 kHz.
-   - `headroom`: true peak above −1 dBTP on the master, or a bus clipping
-     internally.
-   - `loudness_jump`: short-term loudness moving more than a set amount at
-     a section boundary with no plan to say it should (ADR 0008).
-   - `low_end_width`: correlation below 150 Hz under 0.5.
-   - `register_clash`: two MIDI parts sustaining notes within a minor
-     second of each other in the same octave below C4. This is read from
-     the MIDI, not the audio.
+   - `headroom`: true peak above −1 dBTP on the master, or a bus's sample
+     peak above 0 dBFS (clipping internally).
+   - `loudness_jump`: master short-term loudness moving more than a set
+     amount at a section boundary: its value just before the boundary
+     against the first value whose 3 s window lies wholly after it. No
+     plan can mark a jump as intended until E002 (ADR 0008).
+   - `low_end_width`: correlation below 150 Hz under 0.5 in over 30 % of
+     the frames that have low end, on the master and on tracks that are
+     not buses.
+   - `register_clash`: two MIDI parts sustaining notes a minor second
+     apart, both below C4, overlapping for at least 0.1 s. This is read
+     from the MIDI, not the audio.
+
+   Sections are the project's regions within the range. Stretches that no
+   region covers are sections named `(no region)`, and a range with no
+   regions is one section named `range`. A track's part in a bus is its
+   probe's measurement scaled by its fader and by its pan's effect on mid,
+   taken as a balance control; muted tracks count as silent. Automation
+   is not yet taken into account.
 3. **Thresholds are measured.** Every threshold above is a starting point.
-   Ticket 0013 calibrates them on Fenland's stems and mixes, where we
-   already know what was fixed and why. Thresholds live in one table in
-   `mort-map`, with the reason for each value.
+   Thresholds live in one table in `mort-map` (`thresholds::TABLE`, shown
+   by `mort findings --thresholds`), with the reason for each value.
+   - Ticket 0013 calibrated them on synthetic mixes with problems planted
+     in them, at the user's choice: pink-noise parts in neighbouring
+     ranges, with an overlapping part, a low-mid or upper-mid band, a
+     louder chorus, a wide bass or clashing notes added one at a time. The
+     calibration test prints every measurement, flagged or not.
+   - That set the masking band count at three (clean crossovers reach
+     two) and the mud and harsh excess at 2 dB. Clean mixes read up to
+     1.2 dB; a band at the others' level reads 2.9–3.3 dB.
+   - Calibration on Fenland's stems, where we know what was fixed and
+     why, comes later (ticket 0017).
+   - `mort findings --all` reports every measurement as if it were a
+     finding, so a caller can see how close each one is to its
+     threshold.
 4. **Queries** come at three levels:
    - `summary(range)`: one row per section, with loudness, tilt, width,
      density and finding counts;
@@ -74,7 +101,11 @@ down from a section to a track to a band.
    - `frames(id, range, features, step)`: raw frames resampled to `step`,
      for when the summaries are not enough.
 
-   The CLI prints compact text by default and JSON with `--json`.
+   They are the RPCs `map.summary`, `map.track` and `map.frames`, with
+   `map.findings` for findings. The CLI has `mort summary`, `mort report
+   <track>`, `mort frames <track> <range>` and `mort findings`. It prints
+   compact text by default and JSON with `--json`. `mort findings` shows
+   the 20 worst unless `--limit` says otherwise.
 5. **Compare.** `compare(capture_a, capture_b, range)` gives, per track
    and section, the changes in features and the findings that appeared or
    disappeared. This is how an edit is judged.

@@ -10,6 +10,7 @@ mod install;
 mod measure;
 mod midi;
 mod probes;
+mod report;
 mod resolve;
 mod show;
 mod smf;
@@ -118,6 +119,20 @@ enum Command {
 
     /// Show what the mix map covers and what is stale.
     Map,
+
+    /// Summarise the mix by section: the master, each track's level and
+    /// share, and finding counts.
+    Summary(report::Summary),
+
+    /// List problems in the mix (masking, mud, harshness, headroom,
+    /// loudness jumps, wide low end, register clashes), worst first.
+    Findings(report::Findings),
+
+    /// Show one track's features by section, and its share of its bus.
+    Report(report::Report),
+
+    /// Show a track's raw frames over a range, resampled.
+    Frames(report::Frames),
 
     /// Undo mort's last edit. Refuses if the last edit was not mort's.
     Undo,
@@ -286,6 +301,10 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
         Command::Probes { action } => edited(cli, |c| probes::run(c, action.as_ref())),
         Command::Measure(m) => edited(cli, |c| measure::run(c, m)),
         Command::Map => edited(cli, measure::map),
+        Command::Summary(a) => edited(cli, |c| report::summary(c, a)),
+        Command::Findings(a) => edited(cli, |c| report::findings(c, a)),
+        Command::Report(a) => edited(cli, |c| report::report(c, a)),
+        Command::Frames(a) => edited(cli, |c| report::frames(c, a)),
         Command::Undo => edited(cli, |c| edits::undo(c, false)),
         Command::Redo => edited(cli, |c| edits::undo(c, true)),
         Command::Fx {

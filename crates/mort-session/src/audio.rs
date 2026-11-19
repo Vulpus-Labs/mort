@@ -35,6 +35,27 @@ pub enum Source {
         /// Approximate RMS level.
         db: f64,
     },
+    /// Pink noise (equal energy per octave) band-limited to `lo`–`hi` Hz
+    /// by fourth-order filters, at RMS `db` exactly. Use 20 and 20 000
+    /// for the full band.
+    Pink {
+        /// Lower edge.
+        lo: f64,
+        /// Upper edge.
+        hi: f64,
+        /// RMS level.
+        db: f64,
+    },
+    /// Like [`Source::Pink`], but with independent noise in each channel:
+    /// a wide source, its L/R correlation near 0.
+    Wide {
+        /// Lower edge.
+        lo: f64,
+        /// Upper edge.
+        hi: f64,
+        /// RMS level of each channel.
+        db: f64,
+    },
     /// A simple synth voice playing the track's MIDI notes: eight
     /// harmonics falling as `1/k`, velocity-scaled, 5 ms attack and 30 ms
     /// release. `db` is the fundamental's peak at velocity 127.
@@ -152,6 +173,91 @@ impl Biquad {
 /// Butterworth Q values for a fourth-order filter made of two biquads.
 const BUTTER4: [f64; 2] = [0.541_196_100_146_197, 1.306_562_964_876_376_6];
 
+/// Pink noise by Paul Kellet's refined filter, band-limited, scaled to RMS
+/// `db` over the whole buffer.
+fn pink(len: usize, rate: f64, (lo, hi): (f64, f64), db: f64, seed: u64) -> Vec<f64> {
+    let mut white = Noise::new(seed);
+    let mut state = [0.0f64; 7];
+    let mut fs: Vec<Biquad> = Vec::new();
+    if lo > 20.0 {
+        fs.extend(BUTTER4.iter().map(|q| Biquad::high_pass(lo, rate, *q)));
+    }
+    if hi < 20_000.0 {
+        fs.extend(BUTTER4.iter().map(|q| Biquad::low_pass(hi, rate, *q)));
+    }
+    let mut out: Vec<f64> = (0..len)
+        .map(|_| {
+            let x = white.next();
+            state[0] = 0.998_86 * state[0] + x * 0.055_517_9;
+            state[1] = 0.993_32 * state[1] + x * 0.075_075_9;
+            state[2] = 0.969_00 * state[2] + x * 0.153_852_0;
+            state[3] = 0.866_50 * state[3] + x * 0.310_485_6;
+            state[4] = 0.550_00 * state[4] + x * 0.532_952_2;
+            state[5] = -0.761_6 * state[5] - x * 0.016_898_0;
+            let p = state[0]
+                + state[1]
+                + state[2]
+                + state[3]
+                + state[4]
+                + state[5]
+                + state[6]
+                + x * 0.5362;
+            state[6] = x * 0.115_926;
+            fs.iter_mut().fold(p, |v, f| f.run(v))
+        })
+        .collect();
+    #[expect(clippy::cast_precision_loss, reason = "buffer lengths are small")]
+    let rms = (out.iter().map(|v| v * v).sum::<f64>() / len.max(1) as f64).sqrt();
+    if rms > 0.0 {
+        let k = gain(db) / rms;
+        for v in &mut out {
+            *v *= k;
+        }
+    }
+    out
+}
+
+/// Adds `source` to `left` and `right`, as [`add`] does for one channel.
+/// Wide sources put independent noise in each.
+#[expect(clippy::cast_precision_loss, reason = "sample indices are small")]
+pub fn add_stereo(
+    [left, right]: [&mut [f64]; 2],
+    start: f64,
+    rate: f64,
+    source: &Source,
+    span: (f64, f64),
+    seed: u64,
+    notes: &[Note],
+) {
+    let on = |i: usize| {
+        let x = start + i as f64 / rate;
+        x >= span.0 && x < span.1
+    };
+    if let Source::Wide { lo, hi, db } = *source {
+        for (k, ch) in [left, right].into_iter().enumerate() {
+            let sig = pink(
+                ch.len(),
+                rate,
+                (lo, hi),
+                db,
+                seed ^ ((k as u64 + 1) * 0x5851_f42d),
+            );
+            for (i, (o, v)) in ch.iter_mut().zip(sig).enumerate() {
+                if on(i) {
+                    *o += v;
+                }
+            }
+        }
+        return;
+    }
+    let mut mono = vec![0.0; left.len()];
+    add(&mut mono, start, rate, source, span, seed, notes);
+    for ((l, r), m) in left.iter_mut().zip(right.iter_mut()).zip(mono) {
+        *l += m;
+        *r += m;
+    }
+}
+
 /// Adds `source` to `out`, which starts at project time `start`, sampled
 /// at `rate`, over `[from, to)` only. `seed` makes noise differ between
 /// tracks; `notes` are the track's MIDI notes, for [`Source::Voice`].
@@ -200,6 +306,14 @@ pub fn add(
                 .collect();
             for (i, o) in out.iter_mut().enumerate() {
                 let v = fs.iter_mut().fold(a * n.next(), |x, f| f.run(x));
+                if on(i) {
+                    *o += v;
+                }
+            }
+        }
+        Source::Pink { lo, hi, db } | Source::Wide { lo, hi, db } => {
+            let sig = pink(out.len(), rate, (lo, hi), db, seed);
+            for (i, (o, v)) in out.iter_mut().zip(sig).enumerate() {
                 if on(i) {
                     *o += v;
                 }
@@ -294,6 +408,46 @@ mod tests {
         };
         add(&mut b, 0.0, rate, &band, (0.0, 1.0), 1, &[]);
         assert!((db(rms(&b)) + 20.0).abs() < 1.5, "{}", db(rms(&b)));
+    }
+
+    #[test]
+    #[expect(clippy::many_single_char_names, reason = "signal names")]
+    fn pink_and_wide() {
+        let rate = 48_000.0;
+        let mut p = vec![0.0; 96_000];
+        let pk = Source::Pink {
+            lo: 20.0,
+            hi: 20_000.0,
+            db: -20.0,
+        };
+        add(&mut p, 0.0, rate, &pk, (0.0, 2.0), 1, &[]);
+        assert!((db(rms(&p)) + 20.0).abs() < 0.01);
+        // Equal energy per octave: 100–200 Hz holds as much as 1–2 kHz.
+        let band = |lo: f64, hi: f64| {
+            let mut fs: Vec<Biquad> = BUTTER4
+                .iter()
+                .map(|q| Biquad::high_pass(lo, rate, *q))
+                .chain(BUTTER4.iter().map(|q| Biquad::low_pass(hi, rate, *q)))
+                .collect();
+            let y: Vec<f64> = p
+                .iter()
+                .map(|x| fs.iter_mut().fold(*x, |v, f| f.run(v)))
+                .collect();
+            db(rms(&y[24_000..]))
+        };
+        let (a, b) = (band(100.0, 200.0), band(1000.0, 2000.0));
+        assert!((a - b).abs() < 1.0, "{a} vs {b}");
+
+        let (mut l, mut r) = (vec![0.0; 48_000], vec![0.0; 48_000]);
+        let wide = Source::Wide {
+            lo: 40.0,
+            hi: 150.0,
+            db: -20.0,
+        };
+        add_stereo([&mut l, &mut r], 0.0, rate, &wide, (0.0, 1.0), 9, &[]);
+        let c: f64 = l.iter().zip(&r).map(|(a, b)| a * b).sum::<f64>()
+            / (l.iter().map(|a| a * a).sum::<f64>() * r.iter().map(|b| b * b).sum::<f64>()).sqrt();
+        assert!(c.abs() < 0.3, "correlation {c}");
     }
 
     #[test]

@@ -21,7 +21,10 @@ use std::time::Instant;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use mort_map::{Capture, MixMap, Mode, Now, Routing, Span, TimedFrame, fnv, store};
+use mort_map::analysis::{TrackMeta, View, sections};
+use mort_map::{
+    Capture, MixMap, Mode, Now, Routing, Span, TimedFrame, findings, fnv, query, store,
+};
 use mort_proto::model::TrackInfo;
 use mort_proto::{ErrorKind, ErrorObject, TrackId};
 use mort_session::Session;
@@ -355,9 +358,175 @@ impl<S: Session> Job<S> for MeasureJob {
     }
 }
 
-/// Registers `measure` and `map.status` (ticket 0012).
+#[derive(Deserialize)]
+struct RangeQuery {
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
+    #[serde(default)]
+    track: Option<TrackId>,
+    #[serde(default)]
+    features: Vec<String>,
+    #[serde(default)]
+    step: Option<f64>,
+    #[serde(default)]
+    kinds: Option<Vec<findings::Kind>>,
+    #[serde(default)]
+    all: bool,
+}
+
+/// What analysis needs to know about each track, the master first. A
+/// track's gain to its bus is its fader times pan's effect on mid (a
+/// balance control), or 0 when muted.
+fn track_meta<S: Session>(s: &S) -> Result<Vec<TrackMeta>, ErrorObject> {
+    let master = s.track(s.master())?;
+    let mut out = vec![TrackMeta {
+        id: master.id,
+        name: master.name,
+        gain: 1.0,
+        bus: None,
+        notes: vec![],
+    }];
+    for t in s.tracks() {
+        let mut notes = Vec::new();
+        for item in s.items(t.id)?.into_iter().filter(|i| i.midi) {
+            notes.extend(s.notes(item.id)?);
+        }
+        let mid = f64::midpoint((1.0 - t.pan).min(1.0), (1.0 + t.pan).min(1.0));
+        out.push(TrackMeta {
+            id: t.id,
+            name: t.name,
+            gain: if t.mute { 0.0 } else { t.volume * mid },
+            bus: t.main_send.then(|| t.parent.unwrap_or(master.id)),
+            notes,
+        });
+    }
+    Ok(out)
+}
+
+/// The range a query covers: the one given, or everything the map holds.
+fn query_range(map: &MixMap, q: &RangeQuery) -> Result<Span, ErrorObject> {
+    match (q.start, q.end) {
+        (Some(a), Some(b)) => check_range(a, b).map(|()| Span::new(a, b)),
+        (None, None) => map
+            .captures()
+            .map(|c| c.span)
+            .reduce(|a, b| a.union(b))
+            .ok_or_else(|| invalid("the map is empty", "measure first: `mort measure <range>`")),
+        _ => Err(invalid(
+            "a range needs both a start and an end",
+            "give both, or neither for everything measured",
+        )),
+    }
+}
+
+/// Runs `f` over a view of the map for the query's range.
+fn with_view<S: Session, T>(
+    s: &S,
+    store: &Shared,
+    q: &RangeQuery,
+    f: impl FnOnce(&View<'_>) -> Result<T, ErrorObject>,
+) -> Result<T, ErrorObject> {
+    let mut st = store.borrow_mut();
+    st.sync(s);
+    let range = query_range(&st.map, q)?;
+    let (hashes, routing, _) = project_now(s)?;
+    let now = Now {
+        hashes,
+        routing,
+        tempo: s.tempo_map(),
+    };
+    let view = View {
+        map: &st.map,
+        now: &now,
+        master: s.master(),
+        tracks: track_meta(s)?,
+        sections: sections(&s.regions(), range),
+    };
+    f(&view)
+}
+
+fn the_track<S: Session>(s: &S, q: &RangeQuery) -> Result<TrackId, ErrorObject> {
+    let t = q
+        .track
+        .ok_or_else(|| invalid("name a track", "give `track`"))?;
+    s.track(t)?;
+    Ok(t)
+}
+
+/// Registers the queries and findings of ticket 0013 over `store`.
+fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared) {
+    let st = Rc::clone(store);
+    read(d, "map.findings", move |s: &S, q: RangeQuery| {
+        with_view(s, &st, &q, |v| {
+            let lim = if q.all {
+                mort_map::thresholds::Limits::ALL
+            } else {
+                mort_map::thresholds::Limits::DEFAULT
+            };
+            let mut fs = findings::findings(v, &lim);
+            if let Some(kinds) = &q.kinds {
+                fs.retain(|f| kinds.contains(&f.kind));
+            }
+            Ok(json!({ "sections": v.sections, "findings": fs }))
+        })
+    });
+    let st = Rc::clone(store);
+    read(d, "map.summary", move |s: &S, q: RangeQuery| {
+        with_view(s, &st, &q, |v| {
+            let fs = findings::findings(v, &mort_map::thresholds::Limits::DEFAULT);
+            Ok(json!({ "sections": query::summary(v, &fs), "findings": fs.len() }))
+        })
+    });
+    let st = Rc::clone(store);
+    read(d, "map.track", move |s: &S, q: RangeQuery| {
+        let t = the_track(s, &q)?;
+        with_view(s, &st, &q, |v| {
+            let name = v.meta(t).map(|m| m.name.clone());
+            Ok(json!({ "track": t, "name": name, "sections": query::track(v, t) }))
+        })
+    });
+    let st = Rc::clone(store);
+    read(d, "map.frames", move |s: &S, q: RangeQuery| {
+        let t = the_track(s, &q)?;
+        if q.features.is_empty() {
+            return Err(invalid(
+                "name the features to read",
+                &format!(
+                    "give `features`: any of {}, band:<Hz>, side:<Hz>",
+                    query::SCALARS.join(", ")
+                ),
+            ));
+        }
+        with_view(s, &st, &q, |v| {
+            let range = v.sections.first().map_or(Span::new(0.0, 0.0), |a| {
+                a.span.union(v.sections.last().map_or(a.span, |b| b.span))
+            });
+            let r = query::frames(v, t, range, &q.features, q.step.unwrap_or(0.05))
+                .map_err(|e| invalid(e, "see `mort frames --help`"))?;
+            Ok(
+                json!({ "track": t, "columns": r.columns, "rows": r.rows, "stale": v.stale(t, range) }),
+            )
+        })
+    });
+    read(d, "map.thresholds", |_: &S, _: NoParams| {
+        let rows: Vec<Value> = mort_map::thresholds::TABLE
+            .iter()
+            .map(
+                |t| json!({ "name": t.name, "value": t.value, "unit": t.unit, "reason": t.reason }),
+            )
+            .collect();
+        Ok(json!({ "thresholds": rows }))
+    });
+}
+
+/// Registers `measure` and `map.status` (ticket 0012), and the queries
+/// `map.summary`, `map.track`, `map.frames`, `map.findings` and
+/// `map.thresholds` (ticket 0013).
 pub fn register_measure<S: Session + 'static>(d: &mut Dispatcher<S>) {
     let shared: Shared = Rc::new(RefCell::new(Store::new()));
+    register_queries(d, &shared);
     let st = Rc::clone(&shared);
     d.register("measure", true, move |ctx: &mut Ctx<'_, S>, params| {
         let p: MeasureParams = match parse("measure", params) {

@@ -13,7 +13,11 @@
 //!
 //! Nothing here depends on REAPER.
 
+pub mod analysis;
+pub mod findings;
+pub mod query;
 pub mod store;
+pub mod thresholds;
 
 use std::collections::{BTreeMap, BTreeSet};
 

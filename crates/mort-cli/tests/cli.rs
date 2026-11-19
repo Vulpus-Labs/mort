@@ -1058,3 +1058,98 @@ fn measure_and_map() {
     let t = ok(&b.mort(&["measure", "--stale"]));
     assert!(t.starts_with("nothing is stale"), "{t}");
 }
+
+/// Twenty tracks of pink noise 0.85 octave wide, 0.43 octave apart, alternating 12 dB in level so that neighbours never compete; the
+/// twentieth doubles the eleventh, so that those two mask each other. One
+/// region.
+fn twenty(s: &mut FakeSession) {
+    use mort_session::{NewTrack, Session, Source};
+    for i in 0..20 {
+        let k = if i == 19 { 10 } else { i };
+        let lo = 40.0 * 1.35f64.powi(k);
+        let db = if k % 2 == 0 { -30.0 } else { -42.0 };
+        let name = if i == 19 {
+            "Double".to_owned()
+        } else {
+            format!("Part {i:02}")
+        };
+        let t = s
+            .add_track(NewTrack {
+                name,
+                ..NewTrack::default()
+            })
+            .unwrap();
+        s.add_sound(
+            t,
+            Source::Pink {
+                lo,
+                hi: lo * 1.8,
+                db,
+            },
+            None,
+        )
+        .unwrap();
+    }
+    s.add_region("verse", 0.0, Some(2.0));
+}
+
+#[test]
+fn summary_findings_report_and_frames() {
+    let b = FakeBridge::start_with("report", twenty);
+    let o = b.mort(&["findings"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("the map is empty"), "{}", stderr(&o));
+    ok(&b.mort(&["measure", "1.1..2.1"]));
+
+    let t = ok(&b.mort(&["summary"]));
+    assert!(t.starts_with("verse 0.00–2.00s  "), "{t}");
+    assert!(
+        t.lines().count() <= 30,
+        "a section of 20 tracks stays short:\n{t}"
+    );
+    assert!(t.contains("findings: masking"), "{t}");
+    assert!(
+        t.lines().any(|l| l.trim_start().starts_with("Double")),
+        "{t}"
+    );
+
+    let t = ok(&b.mort(&["findings", "--kind", "masking"]));
+    assert!(t.starts_with("verse 0.00–2.00s\n"), "{t}");
+    assert!(t.contains("Part 10 and Double compete at"), "{t}");
+    assert!(t.contains("\n1 finding\n"), "only the planted pair: {t}");
+
+    // Everything, as if each measurement were a finding, is cut short.
+    let t = ok(&b.mort(&["findings", "--all"]));
+    assert!(t.contains("more: --limit 0 shows all"), "{t}");
+    assert!(t.lines().count() < 30, "{t}");
+
+    let t = ok(&b.mort(&["findings", "--thresholds"]));
+    assert!(
+        t.contains("mud_excess") && t.contains("200-500 Hz part"),
+        "{t}"
+    );
+
+    let t = ok(&b.mort(&["report", "double"]));
+    assert!(t.starts_with("Double\nverse 0.00–2.00s  "), "{t}");
+    assert!(t.contains("share of MASTER:"), "{t}");
+
+    let t = ok(&b.mort(&["frames", "double", "1.1..1.3", "-f", "rms_dbfs,band:1k"]));
+    let rows: Vec<&str> = t.lines().collect();
+    assert!(
+        rows[0].contains("rms_dbfs") && rows[0].contains("band:1k"),
+        "{t}"
+    );
+    assert_eq!(
+        rows.len(),
+        1 + 2 + 1,
+        "a header, two half-second rows, state: {t}"
+    );
+
+    let o = b.mort(&["frames", "double", "1.1..1.3", "-f", "loudness"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("no feature `loudness`"),
+        "{}",
+        stderr(&o)
+    );
+}

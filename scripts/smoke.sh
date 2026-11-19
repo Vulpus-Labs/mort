@@ -414,6 +414,22 @@ check("measure --stale: just those, and then all is fresh",
 e, res = measure({"stale": True})
 check("measure --stale: then nothing is stale", e is None and res.get("nothing_stale") is True, str(e or res))
 
+# --- Queries and findings (ticket 0013) -------------------------------------
+r = call("map.summary", {"start": 0.0, "end": 4.0}).get("result", {})
+secs = r.get("sections", [])
+check("map.summary: the verse, with the master and tracks",
+      [x["section"] for x in secs] == ["verse"] and secs[0]["master"] is not None
+      and {t["name"] for t in secs[0]["tracks"]} >= {"Kick", "Synth"},
+      str([(x["section"], x["master"], [t["name"] for t in x["tracks"]]) for x in secs]))
+r = call("map.track", {"track": synth, "start": 0.0, "end": 4.0}).get("result", {})
+sec = (r.get("sections") or [{}])[0]
+check("map.track: the synth's share of the master", sec.get("share") is not None and sec["share"]["bus"] == lst["master"]["id"],
+      str(sec.get("share")))
+r = call("map.findings", {"start": 0.0, "end": 4.0, "all": True}).get("result", {})
+check("map.findings --all: a measurement of every audio kind",
+      {"masking", "mud", "harsh", "headroom", "low_end_width"} <= {f["kind"] for f in r.get("findings", [])},
+      str(sorted({f["kind"] for f in r.get("findings", [])})))
+
 check("every edit left an undo point", not no_undo_point, ", ".join(no_undo_point) or "all did")
 
 # Save the smoke project's copy so REAPER can quit without asking.
