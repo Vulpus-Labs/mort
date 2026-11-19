@@ -307,6 +307,12 @@ pub fn add_marker(r: &Reaper, name: &str, start: f64, end: Option<f64>) -> c_int
     }
 }
 
+/// The current project's play rate.
+pub fn play_rate(r: &Reaper) -> f64 {
+    // SAFETY: main thread; null means the current project.
+    unsafe { r.Master_GetPlayRate(null_mut()) }
+}
+
 /// The current project's file, if it has been saved.
 pub fn project_path(r: &Reaper) -> Option<String> {
     // SAFETY: main thread; -1 means the current project.

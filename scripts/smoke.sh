@@ -356,15 +356,16 @@ check("render: 80 frames, 50 ms apart from 0 s, stamped with the run",
       f"{len(fr)} frames, first at {starts[:1]}, steps {min(steps, default=0):.6f}..{max(steps, default=0):.6f}")
 check("render: the synth is heard", loud and min(loud) > -40, f"momentary {min(loud, default=0):.1f}..{max(loud, default=0):.1f} LUFS")
 
+# Playing is an audition (ADR 0012): after the warm-up, the map takes it.
 r = call("play", {"start": 0.0, "end": 2.0})
 done = wait_job(r["result"]["job"])
-run = done.get("result", {}).get("run")
-fr, before = frames(slot, run, 0.0, 2.0)
-starts = [f["start"] for f in fr]
-steps = [b - a for a, b in zip(starts, starts[1:])]
-check("live play: frames on the timeline",
-      len(fr) == 40 and before == 0 and abs(starts[0]) < 0.05 and all(abs(s - 0.05) < 1e-6 for s in steps),
-      f"{len(fr)} frames, first at {starts[:1]}, steps {min(steps, default=0):.6f}..{max(steps, default=0):.6f}")
+_time.sleep(0.5)  # a few ticks to fold the stretch in
+caps = [c for c in call("map.status")["result"]["captures"] if c["source"] == "audition"]
+check("live play: an audition capture after the warm-up",
+      # REAPER plays on until the job's next tick stops it, and the map
+      # keeps what was heard: up to a few hundred ms past the end.
+      len(caps) == 1 and abs(caps[0]["start"] - 0.7) < 0.06 and 2.0 <= caps[0]["end"] < 2.5,
+      str(caps))
 
 r = call("render", {"start": 14.0, "end": 18.0})
 done = wait_job(r["result"]["job"])

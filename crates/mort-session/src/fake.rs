@@ -268,6 +268,27 @@ pub struct FakeSession {
     run: u64,
     next_run: u64,
     frames: Vec<(u32, Record)>,
+    meters: Meters,
+    loop_range: Option<(f64, f64)>,
+    play_rate: f64,
+    monitored: HashSet<TrackId>,
+}
+
+/// The probes' analyzers during playback, kept from one advance to the
+/// next as a probe keeps its own. A copy of the session starts afresh.
+#[derive(Default)]
+struct Meters(HashMap<u32, mort_features::Analyzer>);
+
+impl Clone for Meters {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for Meters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Meters({} probes)", self.0.len())
+    }
 }
 
 impl Default for FakeSession {
@@ -319,6 +340,36 @@ impl FakeSession {
             run: 0,
             next_run: 1,
             frames: vec![],
+            meters: Meters::default(),
+            loop_range: None,
+            play_rate: 1.0,
+            monitored: HashSet::new(),
+        }
+    }
+
+    /// Moves the play position to `time`, as a click on the timeline
+    /// would. Probes see the jump and start their frames afresh.
+    pub fn seek(&mut self, time: f64) {
+        self.position = time;
+        self.meters.0.clear();
+    }
+
+    /// Loops playback over `range`: reaching its end jumps to its start.
+    pub fn set_loop(&mut self, range: Option<(f64, f64)>) {
+        self.loop_range = range;
+    }
+
+    /// Sets the play rate REAPER reports. The fake's audio is unchanged.
+    pub fn set_play_rate(&mut self, rate: f64) {
+        self.play_rate = rate;
+    }
+
+    /// Arms a track with input monitoring on, or not.
+    pub fn set_monitored(&mut self, track: TrackId, on: bool) {
+        if on {
+            self.monitored.insert(track);
+        } else {
+            self.monitored.remove(&track);
         }
     }
 
@@ -409,15 +460,55 @@ impl FakeSession {
     }
 
     /// Lets the fake's transport reach `time`, stopping at the end of the
-    /// range being played.
+    /// range being played or wrapping round the loop. Probes hear the audio
+    /// as it plays.
     pub fn advance_to(&mut self, time: f64) {
-        if let Some((_, end)) = self.playing {
-            if time >= end {
-                self.position = end;
-                self.playing = None;
-            } else {
-                self.position = time;
+        let mut time = time;
+        for _ in 0..1000 {
+            let Some((_, end)) = self.playing else {
+                return;
+            };
+            let wrap = self.loop_range.filter(|(_, b)| self.position < *b);
+            let limit = wrap.map_or(end, |(_, b)| b);
+            let to = time.min(limit);
+            if to > self.position {
+                self.hear(self.position, to);
+                self.position = to;
             }
+            if time < limit {
+                return;
+            }
+            let Some((a, b)) = wrap else {
+                self.playing = None;
+                return;
+            };
+            let left = time - b;
+            self.seek(a);
+            if left <= 0.0 {
+                return;
+            }
+            time = a + left;
+        }
+    }
+
+    /// Feeds `[from, to)` of the project's audio to the probes, through
+    /// meters kept across calls, under the current run.
+    fn hear(&mut self, from: f64, to: f64) {
+        let rate = self.sample_rate;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "positions are small"
+        )]
+        let n = ((to * rate).round() - (from * rate).round()).max(0.0) as usize;
+        let taps = self.taps(from, n);
+        let run = self.run;
+        for (slot, [l, r]) in taps {
+            let meter = self.meters.0.entry(slot).or_insert_with(|| {
+                mort_features::Analyzer::new(rate, PROBE_BLOCK)
+                    .expect("the fake's rate is supported")
+            });
+            feed(meter, slot, run, from, rate, &l, &r, &mut self.frames);
         }
     }
 
@@ -828,6 +919,8 @@ impl Session for FakeSession {
     fn audio_chunk(&self, id: TrackId) -> Result<String> {
         let mut t = self.get(id)?.clone();
         t.name.clear();
+        // Solo is not audio state (ADR 0012 §4).
+        t.solo = false;
         t.fx.retain(|f| f.plugin != PROBE);
         Ok(serde_json::to_string(&t).expect("fake tracks serialise"))
     }
@@ -1235,10 +1328,7 @@ impl Session for FakeSession {
     fn play(&mut self, start: f64, end: f64) -> Result<()> {
         check_range(start, end)?;
         self.playing = Some((start, end));
-        self.position = start;
-        // Probes hear the whole range now; frames past where playback
-        // stops are dropped when it stops.
-        self.synthesize(start, end);
+        self.seek(start);
         Ok(())
     }
 
@@ -1250,11 +1340,8 @@ impl Session for FakeSession {
     }
 
     fn stop(&mut self) {
-        if self.playing.take().is_some() {
-            let (run, at) = (self.run, self.position);
-            self.frames
-                .retain(|(_, r)| r.run != run || r.start + 0.05 <= at);
-        }
+        self.playing = None;
+        self.meters.0.clear();
     }
 
     fn is_playing(&self) -> bool {
@@ -1263,6 +1350,14 @@ impl Session for FakeSession {
 
     fn position(&self) -> f64 {
         self.position
+    }
+
+    fn play_rate(&self) -> f64 {
+        self.play_rate
+    }
+
+    fn monitored(&self) -> Vec<TrackId> {
+        self.monitored.iter().copied().collect()
     }
 
     fn begin_run(&mut self) -> u64 {
@@ -1306,42 +1401,118 @@ impl FakeSession {
             reason = "test ranges are short"
         )]
         let n = ((end + RENDER_TAIL - start) * self.sample_rate).round() as usize;
+        let rate = self.sample_rate;
+        let run = self.run;
+        for (slot, [l, r]) in self.taps(start, n) {
+            let mut a = mort_features::Analyzer::new(rate, PROBE_BLOCK)
+                .expect("the fake's rate is supported");
+            feed(&mut a, slot, run, start, rate, &l, &r, &mut self.frames);
+        }
+    }
+
+    /// Runs the mixer for `n` samples from `start` and returns what each
+    /// enabled probe hears.
+    fn taps(&self, start: f64, n: usize) -> Vec<(u32, [Vec<f64>; 2])> {
         let mut graph = Graph {
             start,
             n,
             done: HashMap::new(),
             visiting: HashSet::new(),
             taps: vec![],
+            silenced: self.silenced(),
         };
         for t in self.all_tracks() {
             graph.out(self, t.id);
         }
-        let rate = self.sample_rate;
-        for (slot, [l, r]) in graph.taps {
-            let mut a = mort_features::Analyzer::new(rate, PROBE_BLOCK)
-                .expect("the fake's rate is supported");
-            #[expect(clippy::cast_possible_truncation, reason = "audio to f32")]
-            let (l, r): (Vec<f32>, Vec<f32>) = (
-                l.iter().map(|v| *v as f32).collect(),
-                r.iter().map(|v| *v as f32).collect(),
-            );
-            for (b, (lb, rb)) in l.chunks(PROBE_BLOCK).zip(r.chunks(PROBE_BLOCK)).enumerate() {
-                #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
-                let pos = start + (b * PROBE_BLOCK) as f64 / rate;
-                let run = self.run;
-                let frames = &mut self.frames;
-                a.process(lb, rb, |f| {
-                    frames.push((
-                        slot,
-                        Record {
-                            run,
-                            start: pos + (f64::from(f.end_offset) - f64::from(f.len)) / rate,
-                            frame: *f,
-                        },
-                    ));
-                });
-            }
+        graph.taps
+    }
+
+    /// Tracks solo silences: while anything is soloed, every track that is
+    /// not soloed, feeds no soloed track and is fed by none.
+    fn silenced(&self) -> HashSet<TrackId> {
+        let soloed: HashSet<TrackId> = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.solo)
+            .map(|t| t.id)
+            .collect();
+        if soloed.is_empty() {
+            return HashSet::new();
         }
+        let master = self.project.master.id;
+        let feeds = |t: &FakeTrack| -> Vec<TrackId> {
+            let mut out: Vec<TrackId> = t.sends.iter().map(|s| s.dest).collect();
+            if t.main_send {
+                out.push(t.parent.unwrap_or(master));
+            }
+            out
+        };
+        let reach = |from: TrackId, down: bool| -> HashSet<TrackId> {
+            let mut seen = HashSet::new();
+            let mut todo = vec![from];
+            while let Some(x) = todo.pop() {
+                for t in &self.project.tracks {
+                    let next = if down {
+                        if t.id == x { feeds(t) } else { vec![] }
+                    } else if feeds(t).contains(&x) {
+                        vec![t.id]
+                    } else {
+                        vec![]
+                    };
+                    for n in next {
+                        if seen.insert(n) {
+                            todo.push(n);
+                        }
+                    }
+                }
+            }
+            seen
+        };
+        self.project
+            .tracks
+            .iter()
+            .map(|t| t.id)
+            .filter(|t| {
+                !soloed.contains(t)
+                    && reach(*t, true).is_disjoint(&soloed)
+                    && reach(*t, false).is_disjoint(&soloed)
+            })
+            .collect()
+    }
+}
+
+/// Feeds a probe's audio, starting at project time `start`, to its meter
+/// in blocks, stamping each frame as the probe does.
+#[expect(clippy::too_many_arguments, reason = "a probe's whole context")]
+fn feed(
+    meter: &mut mort_features::Analyzer,
+    slot: u32,
+    run: u64,
+    start: f64,
+    rate: f64,
+    l: &[f64],
+    r: &[f64],
+    out: &mut Vec<(u32, Record)>,
+) {
+    #[expect(clippy::cast_possible_truncation, reason = "audio to f32")]
+    let (l, r): (Vec<f32>, Vec<f32>) = (
+        l.iter().map(|v| *v as f32).collect(),
+        r.iter().map(|v| *v as f32).collect(),
+    );
+    for (b, (lb, rb)) in l.chunks(PROBE_BLOCK).zip(r.chunks(PROBE_BLOCK)).enumerate() {
+        #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
+        let pos = start + (b * PROBE_BLOCK) as f64 / rate;
+        meter.process(lb, rb, |f| {
+            out.push((
+                slot,
+                Record {
+                    run,
+                    start: pos + (f64::from(f.end_offset) - f64::from(f.len)) / rate,
+                    frame: *f,
+                },
+            ));
+        });
     }
 }
 
@@ -1352,6 +1523,7 @@ struct Graph {
     done: HashMap<TrackId, [Vec<f64>; 2]>,
     visiting: HashSet<TrackId>,
     taps: Vec<(u32, [Vec<f64>; 2])>,
+    silenced: HashSet<TrackId>,
 }
 
 impl Graph {
@@ -1438,7 +1610,11 @@ impl Graph {
             }
         }
         let (gl, gr) = balance(track.pan);
-        let gain = track.volume;
+        let gain = if self.silenced.contains(&id) {
+            0.0
+        } else {
+            track.volume
+        };
         for x in &mut left {
             *x *= gain * gl;
         }

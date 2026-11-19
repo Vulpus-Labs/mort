@@ -90,6 +90,28 @@ pub enum Mode {
     Play,
 }
 
+/// Where a capture's frames came from (ADR 0012 §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// A `measure` that rendered.
+    #[default]
+    Render,
+    /// A `measure` that played.
+    Play,
+    /// Playback nobody asked mort to measure: the person, or mort's `play`.
+    Audition,
+}
+
+impl From<Mode> for Source {
+    fn from(m: Mode) -> Self {
+        match m {
+            Mode::Render => Source::Render,
+            Mode::Play => Source::Play,
+        }
+    }
+}
+
 /// One frame and the project time of its first sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimedFrame {
@@ -110,8 +132,13 @@ pub struct Capture {
     pub taken: u64,
     /// The project state count when the run started.
     pub state: u64,
-    /// Render or play.
-    pub mode: Mode,
+    /// How it was measured. (Sidecars before format 3 call this `mode`.)
+    #[serde(alias = "mode")]
+    pub source: Source,
+    /// The frames file holding it, if not its own: the stretches of one
+    /// playback share the file named by the first of them (ADR 0012 §5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<u64>,
     /// [`tempo_fingerprint`] up to the range's end.
     pub tempo: u64,
     /// The audio-chunk hash of every track (and the master) when the run
@@ -413,7 +440,9 @@ impl MixMap {
                 Span::new(c.span.start, c.span.end.min(span.start)),
                 Span::new(c.span.start.max(span.end), c.span.end),
             ] {
-                if part.end > part.start {
+                // Stamps carry rounding: a sliver left between two spans
+                // that meet is not a stretch of its own.
+                if part.end - part.start > STAMP_SLACK {
                     next.push(Cover {
                         capture: c.capture,
                         span: part,

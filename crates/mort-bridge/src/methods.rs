@@ -639,12 +639,11 @@ pub(crate) fn check_range(start: f64, end: f64) -> Result<(), ErrorObject> {
 struct PlayJob {
     start: f64,
     end: f64,
-    run: u64,
 }
 
 impl<S: Session> Job<S> for PlayJob {
     fn start(&mut self, s: &mut S) -> Result<(), ErrorObject> {
-        self.run = s.begin_run();
+        // No run: what plays is an audition, and feeds the map (ADR 0012).
         s.play(self.start, self.end)
     }
 
@@ -657,9 +656,7 @@ impl<S: Session> Job<S> for PlayJob {
         if !stopped {
             s.stop();
         }
-        s.end_run(self.run);
         JobPoll::Done(json!({
-            "run": self.run,
             "start": self.start,
             "end": self.end,
             "stopped_at": at,
@@ -669,7 +666,6 @@ impl<S: Session> Job<S> for PlayJob {
 
     fn cancel(&mut self, s: &mut S) {
         s.stop();
-        s.end_run(self.run);
     }
 }
 
@@ -715,7 +711,6 @@ pub fn register_transport<S: Session + 'static>(d: &mut Dispatcher<S>) {
             Ok(p) => Outcome::Job(Box::new(PlayJob {
                 start: p.start,
                 end: p.end,
-                run: 0,
             })),
         }
     });

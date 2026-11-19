@@ -397,6 +397,13 @@ pub trait Session {
     /// The play position, or the edit cursor when stopped.
     fn position(&self) -> f64;
 
+    /// The play rate: 1.0 at normal speed.
+    fn play_rate(&self) -> f64;
+
+    /// Tracks armed for recording with input monitoring on during
+    /// playback: what their probes hear includes live input.
+    fn monitored(&self) -> Vec<TrackId>;
+
     // --- Runs ------------------------------------------------------------
 
     /// Starts a run (ADR 0005 §3): frames probes produce from now on carry

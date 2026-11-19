@@ -853,20 +853,10 @@ fn render_play_and_stop() {
     let b = FakeBridge::start_with("transport", band);
     let t = ok(&b.mort(&["render", "1.1..3.1"]));
     assert!(t.starts_with("rendered 1.1..3.1 (4.00 s of audio"), "{t}");
-    let first: u64 = t
-        .split("run ")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-
     let t = ok(&b.mort(&["play", "1.1..2.1"]));
     assert!(
-        t.starts_with(&format!("played 1.1..2.1, run {}", first + 1)),
-        "runs count up: {t}"
+        t.starts_with("played 1.1..2.1 (heard by the map as an audition)"),
+        "{t}"
     );
 
     // A long play, stopped from outside: the job sees it stop early.

@@ -170,3 +170,49 @@ fn the_map_is_saved_beside_the_project_and_reloads() {
     assert!(again.stale().is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_measure_starts_early_so_its_first_frames_are_right() {
+    let mut s = FakeSession::new();
+    let t = s
+        .add_track(NewTrack {
+            name: "Bass".into(),
+            ..NewTrack::default()
+        })
+        .unwrap();
+    s.add_sound(
+        t,
+        Source::Pink {
+            lo: 40.0,
+            hi: 150.0,
+            db: -20.0,
+        },
+        None,
+    )
+    .unwrap();
+    let mut b = Bench::new(s);
+    let read = |b: &mut Bench| {
+        b.ok(
+            "map.frames",
+            json!({ "track": t, "start": 4.0, "end": 6.0, "features": ["band:63", "short_term_lufs"], "step": 0.5 }),
+        )["rows"]
+            .clone()
+    };
+    // A render rolls in 3 s early: every feature is right from the start.
+    b.measure(json!({ "start": 4.0, "end": 6.0 }));
+    let rows = read(&mut b);
+    let low: Vec<f64> = (0..4).map(|i| rows[i][1][0].as_f64().unwrap()).collect();
+    assert!(
+        (low[0] - low[3]).abs() < 3.0,
+        "the first half second reads like the rest: {low:?}"
+    );
+    assert!(rows[0][1][1].as_f64().unwrap() > -30.0, "{rows}");
+
+    // Playing rolls in 0.7 s early: the low bands are right, short-term
+    // loudness is unknown until its window is full.
+    b.measure(json!({ "start": 4.0, "end": 6.0, "mode": "play" }));
+    let rows = read(&mut b);
+    let low: Vec<f64> = (0..4).map(|i| rows[i][1][0].as_f64().unwrap()).collect();
+    assert!((low[0] - low[3]).abs() < 3.0, "{low:?}");
+    assert!(rows[0][1][1].is_null(), "{rows}");
+}

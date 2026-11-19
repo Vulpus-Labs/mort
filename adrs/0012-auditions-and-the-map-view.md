@@ -1,6 +1,6 @@
 # ADR 0012: Auditions and the map view
 
-- **Status:** Proposed
+- **Status:** Accepted (ticket 0017 implements §1–5)
 - **Date:** 2026-11-19
 
 ## Context
@@ -115,6 +115,28 @@ a time.
     - a side panel: clicking a cell shows that track's `track` query for
       the section, plus the evidence for any finding there. A thresholds
       panel edits the overrides.
+
+## Notes from ticket 0017
+
+- Frames taken on the tick that sees the state, solo set, play rate or
+  monitoring change could have been heard on either side of the change,
+  so they are dropped. The next stretch starts with the next tick's
+  frames.
+- Stretches are added to the map when they end. A long, unbroken
+  playback adds nothing until it stops or splits. Ticket 0018 needs the
+  map to fill in while the person listens; it can close a stretch every
+  few seconds and continue it without a new warm-up, since the analyzer
+  runs on uninterrupted.
+- mort's own `play` now starts no run, so what it plays is an audition.
+  REAPER plays on until the job's next tick stops the transport, and the
+  map keeps what was heard: up to about 0.25 s past the end in REAPER
+  7.67.
+- `measure` had the warm-up problem too. It now pre-rolls (ADR 0006
+  §4).
+- Unknown short-term loudness is NaN in the map's frames. Queries skip
+  it, and JSON shows it as `null`.
+- Format 3 frames files hold several captures; format 2 sidecars still
+  load, and their `mode` reads as `source`.
 
 ## Consequences
 

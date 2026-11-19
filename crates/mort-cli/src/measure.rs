@@ -183,7 +183,7 @@ pub fn map(client: &mut Client) -> Result<(Vec<String>, Value), Failure> {
     let mut rows = vec![vec![
         "#".to_owned(),
         "range".into(),
-        "mode".into(),
+        "source".into(),
         "taken".into(),
         "tracks".into(),
     ]];
@@ -191,7 +191,7 @@ pub fn map(client: &mut Client) -> Result<(Vec<String>, Value), Failure> {
         rows.push(vec![
             c["id"].to_string(),
             span(secs(&c["start"]), secs(&c["end"])),
-            c["mode"].as_str().unwrap_or("?").to_owned(),
+            c["source"].as_str().unwrap_or("?").to_owned(),
             ago(c["taken"].as_u64().unwrap_or(0)),
             c["tracks"].to_string(),
         ]);

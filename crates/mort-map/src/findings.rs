@@ -360,9 +360,13 @@ fn loudness_jumps(v: &View<'_>, lim: &Limits, out: &mut Vec<Finding>) {
             .find(|(t, _)| *t + 0.05 >= at + 3.0 - 1e-6)
             .or(later.last())
             .map(|(t, f)| (*t, f64::from(f.short_term_lufs)));
+        // Short-term loudness is NaN where it is unknown (ADR 0012 §2).
         let (Some(from), Some((t, to))) = (before, after) else {
             continue;
         };
+        if !from.is_finite() || !to.is_finite() {
+            continue;
+        }
         let jump = to - from;
         if jump.abs() <= lim.loudness_jump || from < -69.0 && to < -69.0 {
             continue;

@@ -78,6 +78,9 @@ pub struct Ctx<'a, S> {
     pub session: &'a mut S,
 }
 
+/// Work run on every tick.
+pub type Ticker<S> = Box<dyn FnMut(&mut S)>;
+
 /// A method handler.
 pub type Handler<S> = Box<dyn Fn(&mut Ctx<'_, S>, Value) -> Outcome<S>>;
 
@@ -179,6 +182,7 @@ pub struct Dispatcher<S> {
     mort_state: Option<u64>,
     /// Whether the last edit left an undo point with its label.
     last_undo_point: bool,
+    tickers: Vec<Ticker<S>>,
 }
 
 fn invalid(message: impl Into<String>, fix: &str) -> ErrorObject {
@@ -269,6 +273,7 @@ impl<S: Session> Dispatcher<S> {
             seen_state: None,
             mort_state: None,
             last_undo_point: false,
+            tickers: Vec::new(),
         }
     }
 
@@ -286,6 +291,12 @@ impl<S: Session> Dispatcher<S> {
                 handler: Box::new(handler),
             },
         );
+    }
+
+    /// Adds work to run on every tick, after the jobs: for example,
+    /// folding auditions into the map (ADR 0012).
+    pub fn on_tick(&mut self, f: impl FnMut(&mut S) + 'static) {
+        self.tickers.push(Box::new(f));
     }
 
     /// Whether edits are held (ADR 0004 §4).
@@ -330,6 +341,9 @@ impl<S: Session> Dispatcher<S> {
             }
         }
         self.run_jobs(session, now);
+        for t in &mut self.tickers {
+            t(session);
+        }
         self.answer_waits(now);
         self.jobs.retain(|_, j| {
             j.finished_at

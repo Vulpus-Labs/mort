@@ -1418,6 +1418,23 @@ impl Session for Live {
         raw::play_position(self.low())
     }
 
+    fn play_rate(&self) -> f64 {
+        raw::play_rate(self.low())
+    }
+
+    fn monitored(&self) -> Vec<TrackId> {
+        // I_RECMON: 0 off, 1 on, 2 only when not playing (tape style).
+        let r = self.low();
+        raw::tracks(r)
+            .into_iter()
+            .filter(|t| {
+                raw::track_value(r, *t, "I_RECARM") > 0.5
+                    && (raw::track_value(r, *t, "I_RECMON") - 1.0).abs() < 0.5
+            })
+            .map(|t| TrackId(raw::track_guid(r, t)))
+            .collect()
+    }
+
     fn begin_run(&mut self) -> u64 {
         crate::runs::begin()
     }

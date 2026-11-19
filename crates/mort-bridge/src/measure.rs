@@ -35,7 +35,7 @@ use crate::methods::{NoParams, check_range, ensure_probes, is_probe, parse, prob
 /// The map and where it is saved.
 #[derive(Debug, Default)]
 pub struct Store {
-    map: MixMap,
+    pub(crate) map: MixMap,
     path: Option<PathBuf>,
     save_error: Option<String>,
 }
@@ -53,7 +53,7 @@ impl Store {
     }
 
     /// Follows the project file; see the module docs.
-    fn sync<S: Session>(&mut self, s: &S) {
+    pub(crate) fn sync<S: Session>(&mut self, s: &S) {
         let path = s.project().path.map(PathBuf::from);
         if path == self.path {
             return;
@@ -79,7 +79,7 @@ impl Store {
         }
     }
 
-    fn save(&mut self, all: bool) {
+    pub(crate) fn save(&mut self, all: bool) {
         let Some(dir) = self.dir() else {
             return;
         };
@@ -89,7 +89,7 @@ impl Store {
     }
 }
 
-type Shared = Rc<RefCell<Store>>;
+pub(crate) type Shared = Rc<RefCell<Store>>;
 
 /// Every track's audio-chunk hash, the routing and the track list.
 type ProjectNow = (BTreeMap<TrackId, u64>, Routing, Vec<TrackInfo>);
@@ -210,7 +210,35 @@ struct MeasureJob {
     started: Instant,
 }
 
+/// How far before its range a measure starts, so that the analyzer's
+/// windows hold the music before the range and not silence (ticket 0017).
+/// A render can afford the whole short-term window; playback, which the
+/// person sits through, only the low bands' window.
+const PRE_ROLL_RENDER: f64 = 3.0;
+const PRE_ROLL_PLAY: f64 = 0.7;
+
 impl MeasureJob {
+    /// Where the run starts: the range's start less the pre-roll, but not
+    /// before the project's start, where the silence before is real. The
+    /// pre-roll is whole frames, so that frames still start on the range's
+    /// start.
+    fn from(&self) -> f64 {
+        let pre = match self.mode {
+            Mode::Render => PRE_ROLL_RENDER,
+            Mode::Play => PRE_ROLL_PLAY,
+        }
+        .min(self.span.start.max(0.0));
+        let frames = (pre / 0.05 + 1e-9).floor();
+        self.span.start - frames * 0.05
+    }
+
+    /// Whether a frame's short-term window reaches back before the run's
+    /// start into audio the analyzer did not hear.
+    fn short_term_unknown(&self, start: f64) -> bool {
+        let from = self.from();
+        from > 0.0 && start + 0.05 < from + 3.0 - 1e-6
+    }
+
     fn finish<S: Session>(&mut self, s: &mut S) -> JobPoll {
         let Some(before) = self.before.take() else {
             return JobPoll::Failed(ErrorObject::internal("measure finished before it started"));
@@ -237,9 +265,15 @@ impl MeasureJob {
                             measured.insert(
                                 t,
                                 recs.iter()
-                                    .map(|r| TimedFrame {
-                                        start: r.start,
-                                        frame: r.frame,
+                                    .map(|r| {
+                                        let mut frame = r.frame;
+                                        if self.short_term_unknown(r.start) {
+                                            frame.short_term_lufs = f32::NAN;
+                                        }
+                                        TimedFrame {
+                                            start: r.start,
+                                            frame,
+                                        }
                                     })
                                     .collect(),
                             );
@@ -269,7 +303,8 @@ impl MeasureJob {
             span: self.span,
             taken: before.taken,
             state: before.state,
-            mode: self.mode,
+            source: self.mode.into(),
+            file: None,
             tempo: before.tempo,
             inputs: measured
                 .keys()
@@ -323,11 +358,11 @@ impl<S: Session> Job<S> for MeasureJob {
         self.run = s.begin_run();
         match self.mode {
             Mode::Render => {
-                let r = s.render(self.span.start, self.span.end);
+                let r = s.render(self.from(), self.span.end);
                 s.end_run(self.run);
                 r
             }
-            Mode::Play => s.play(self.span.start, self.span.end),
+            Mode::Play => s.play(self.from(), self.span.end),
         }
     }
 
@@ -387,7 +422,7 @@ struct RangeQuery {
 /// What analysis needs to know about each track, the master first. A
 /// track's gain to its bus is its fader times pan's effect on mid (a
 /// balance control), or 0 when muted.
-fn track_meta<S: Session>(s: &S) -> Result<Vec<TrackMeta>, ErrorObject> {
+pub(crate) fn track_meta<S: Session>(s: &S) -> Result<Vec<TrackMeta>, ErrorObject> {
     let master = s.track(s.master())?;
     let mut out = vec![TrackMeta {
         id: master.id,
@@ -640,6 +675,8 @@ fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared)
 pub fn register_measure<S: Session + 'static>(d: &mut Dispatcher<S>) {
     let shared: Shared = Rc::new(RefCell::new(Store::new()));
     register_queries(d, &shared);
+    let mut auditions = crate::audition::Auditioner::new(Rc::clone(&shared));
+    d.on_tick(move |s| auditions.tick(s));
     let st = Rc::clone(&shared);
     d.register("measure", true, move |ctx: &mut Ctx<'_, S>, params| {
         let p: MeasureParams = match parse("measure", params) {
@@ -705,7 +742,7 @@ pub fn register_measure<S: Session + 'static>(d: &mut Dispatcher<S>) {
                     "start": c.span.start,
                     "end": c.span.end,
                     "taken": c.taken,
-                    "mode": c.mode,
+                    "source": c.source,
                     "state": c.state,
                     "tracks": tracks,
                 })

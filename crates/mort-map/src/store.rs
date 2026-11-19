@@ -2,15 +2,22 @@
 //!
 //! `<dir>/<stem>.mort/captures/` holds `index.json`, with the format
 //! version, the next capture id, every kept capture's metadata and each
-//! track's covers, and one `<id>.frames` file per capture with the frames
-//! it took. A capture's frames never change, so its file is written once:
+//! track's covers, and `<id>.frames` files with the frames the captures
+//! took. A capture's frames are in the file named by its `file`, or by its
+//! own id: the stretches of one playback share one file (ADR 0012 §5).
+//! Frames never change, so a file is rewritten only while captures are
+//! still being added to it:
 //!
 //! ```text
-//! "MORTFRM2"
-//! u32 track count
-//! per track: u128 track GUID, u32 frame count,
-//!            per frame: f64 start, 220-byte frame (Frame::to_le_bytes)
+//! "MORTFRM3"
+//! u32 capture count
+//! per capture: u64 id, u32 track count,
+//!   per track: u128 track GUID, u32 frame count,
+//!              per frame: f64 start, 220-byte frame (Frame::to_le_bytes)
 //! ```
+//!
+//! Format 2 files (`MORTFRM2`) hold one capture, named by the file, with no
+//! capture header; they still load.
 //!
 //! All numbers are little-endian.
 
@@ -26,9 +33,10 @@ use mort_proto::{Guid, TrackId};
 
 use crate::{Capture, Cover, MixMap, TimedFrame};
 
-const MAGIC: &[u8; 8] = b"MORTFRM2";
+const MAGIC: &[u8; 8] = b"MORTFRM3";
+const MAGIC_V2: &[u8; 8] = b"MORTFRM2";
 const INDEX: &str = "index.json";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct Index {
@@ -65,12 +73,22 @@ pub fn save(dir: &Path, map: &mut MixMap, all: bool) -> io::Result<()> {
         return Ok(());
     }
     fs::create_dir_all(dir)?;
-    let ids: Vec<u64> = map.all_captures().map(|c| c.id).collect();
-    for id in &ids {
-        if all || map.unsaved().contains(id) {
-            write_atomic(&dir.join(format!("{id}.frames")), &frames_file(map, *id))?;
+    let file_of = |c: &Capture| c.file.unwrap_or(c.id);
+    let files: std::collections::BTreeSet<u64> = map.all_captures().map(file_of).collect();
+    for f in &files {
+        let members: Vec<u64> = map
+            .all_captures()
+            .filter(|c| file_of(c) == *f)
+            .map(|c| c.id)
+            .collect();
+        if all || members.iter().any(|id| map.unsaved().contains(id)) {
+            write_atomic(
+                &dir.join(format!("{f}.frames")),
+                &frames_file(map, &members),
+            )?;
         }
     }
+    let ids: Vec<u64> = files.into_iter().collect();
     let index = Index {
         version: VERSION,
         next: map.next_id(),
@@ -100,26 +118,26 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-fn frames_file(map: &MixMap, id: u64) -> Vec<u8> {
-    let tracks: Vec<TrackId> = map.measured(id).collect();
-    let n: usize = tracks
-        .iter()
-        .map(|t| map.capture_frames(id, *t).len())
-        .sum();
-    let mut out = Vec::with_capacity(12 + tracks.len() * 20 + n * (8 + FRAME_BYTES));
+fn frames_file(map: &MixMap, ids: &[u64]) -> Vec<u8> {
+    let mut out = Vec::new();
     out.extend(MAGIC);
-    out.extend(
-        u32::try_from(tracks.len())
-            .unwrap_or(u32::MAX)
-            .to_le_bytes(),
-    );
-    for t in tracks {
-        let fs = map.capture_frames(id, t);
-        out.extend(t.0.0.to_le_bytes());
-        out.extend(u32::try_from(fs.len()).unwrap_or(u32::MAX).to_le_bytes());
-        for f in fs {
-            out.extend(f.start.to_le_bytes());
-            out.extend(f.frame.to_le_bytes());
+    out.extend(u32::try_from(ids.len()).unwrap_or(u32::MAX).to_le_bytes());
+    for &id in ids {
+        let tracks: Vec<TrackId> = map.measured(id).collect();
+        out.extend(id.to_le_bytes());
+        out.extend(
+            u32::try_from(tracks.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        for t in tracks {
+            let fs = map.capture_frames(id, t);
+            out.extend(t.0.0.to_le_bytes());
+            out.extend(u32::try_from(fs.len()).unwrap_or(u32::MAX).to_le_bytes());
+            for f in fs {
+                out.extend(f.start.to_le_bytes());
+                out.extend(f.frame.to_le_bytes());
+            }
         }
     }
     out
@@ -149,11 +167,9 @@ impl Cursor<'_> {
     }
 }
 
-fn read_frames(bytes: &[u8], id: u64) -> io::Result<BTreeMap<TrackId, Vec<TimedFrame>>> {
-    let mut c = Cursor { b: bytes, at: 0 };
-    if &c.take::<8>()? != MAGIC {
-        return Err(bad(format!("{id}.frames is not a mort frames file")));
-    }
+type Frames = BTreeMap<TrackId, Vec<TimedFrame>>;
+
+fn read_tracks(c: &mut Cursor<'_>) -> io::Result<Frames> {
     let mut out = BTreeMap::new();
     for _ in 0..c.u32()? {
         let track = TrackId(Guid(u128::from_le_bytes(c.take()?)));
@@ -165,6 +181,24 @@ fn read_frames(bytes: &[u8], id: u64) -> io::Result<BTreeMap<TrackId, Vec<TimedF
             frames.push(TimedFrame { start, frame });
         }
         out.insert(track, frames);
+    }
+    Ok(out)
+}
+
+/// The captures in frames file `file`, by id.
+fn read_frames(bytes: &[u8], file: u64) -> io::Result<BTreeMap<u64, Frames>> {
+    let mut c = Cursor { b: bytes, at: 0 };
+    let magic = c.take::<8>()?;
+    let mut out = BTreeMap::new();
+    if &magic == MAGIC_V2 {
+        out.insert(file, read_tracks(&mut c)?);
+    } else if &magic == MAGIC {
+        for _ in 0..c.u32()? {
+            let id = u64::from_le_bytes(c.take()?);
+            out.insert(id, read_tracks(&mut c)?);
+        }
+    } else {
+        return Err(bad(format!("{file}.frames is not a mort frames file")));
     }
     Ok(out)
 }
@@ -181,17 +215,22 @@ pub fn load(dir: &Path) -> io::Result<Option<MixMap>> {
         Err(e) => return Err(e),
     };
     let index: Index = serde_json::from_slice(&index).map_err(|e| bad(e.to_string()))?;
-    if index.version != VERSION {
+    if !(2..=VERSION).contains(&index.version) {
         return Err(bad(format!(
             "captures saved in format {}; this mort reads {VERSION}: delete the directory and measure again",
             index.version
         )));
     }
     let mut frames = BTreeMap::new();
-    for c in &index.captures {
-        match fs::read(dir.join(format!("{}.frames", c.id))) {
+    let files: std::collections::BTreeSet<u64> = index
+        .captures
+        .iter()
+        .map(|c| c.file.unwrap_or(c.id))
+        .collect();
+    for f in files {
+        match fs::read(dir.join(format!("{f}.frames"))) {
             Ok(b) => {
-                frames.insert(c.id, read_frames(&b, c.id)?);
+                frames.extend(read_frames(&b, f)?);
             }
             // A capture without frames is skipped, not fatal.
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}

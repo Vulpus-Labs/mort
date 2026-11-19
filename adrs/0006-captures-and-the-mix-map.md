@@ -21,7 +21,8 @@ longer match the project are worse than none.
      *audio chunk*: its state chunk (`GetTrackStateChunk`, which covers FX
      state, envelopes, items and routing) without its name, selection,
      view and window lines, and without mort's probes. An FX chain left
-     empty is dropped. Renaming, selecting or adding a probe therefore
+     empty is dropped. The solo flag is dropped too (ADR 0012 §4), but
+     mute stays. Renaming, selecting, soloing or adding a probe therefore
      leaves a track fresh;
    - for each measured track, the tracks routed into it at the time.
 2. **The mix map** is the latest capture data for each (track, time)
@@ -43,6 +44,15 @@ longer match the project are worse than none.
      written. It is the default.
    - `play` mode plays the range through the person's monitors in real
      time, for when the person wants to listen too.
+   - **Pre-roll** (ticket 0017). The analyzer's windows start empty, so a
+     run that starts at the range's start reads its first frames wrong:
+     the 63 Hz band 30 dB low at first, recovering over about 0.6 s, and
+     short-term loudness climbing for 3 s. So a render starts 3 s before
+     the range and a play 0.7 s before it, in whole frames, and the
+     frames before the range are clipped. In play mode, short-term
+     loudness is marked unknown (NaN) while its window reaches back
+     before the pre-roll. No pre-roll is needed at the project's start,
+     where the silence before is real.
    Measuring is an edit, because it may add probes (ADR 0004): it is
    refused while edits are held, and its undo point, if any, holds only
    the probes it added. It is the one kind of edit that queues a job. A

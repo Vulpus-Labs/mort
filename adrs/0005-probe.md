@@ -22,7 +22,8 @@ whether the project is playing in real time or rendering faster.
 3. **Stamping.** Each frame carries the project position in seconds of its
    first sample, taken from the CLAP transport in the process call plus the
    sample offset. It also carries a `run` id the bridge sets before each
-   play or render. Frames from blocks with no transport, or with transport
+   `measure` and `render`; other playback carries run 0, which the bridge
+   folds into the map as auditions (ADR 0012). Frames from blocks with no transport, or with transport
    stopped, are dropped. The same code therefore measures live playback and
    offline renders.
 4. **Attach.** On activate, the probe asks the host for

@@ -10,6 +10,7 @@
 //! - [`measure`]: the `measure` job and the mix map it fills.
 //! - `reaper`: the extension entry point and the REAPER session.
 
+pub mod audition;
 pub mod dispatch;
 pub mod measure;
 pub mod methods;

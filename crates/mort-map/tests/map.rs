@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use mort_map::{Capture, Frame, MixMap, Mode, Now, Routing, Span, Stale, TimedFrame, store};
+use mort_map::{Capture, Frame, MixMap, Now, Routing, Source, Span, Stale, TimedFrame, store};
 use mort_proto::{Guid, SteppedTempoMap, TrackId};
 
 const MASTER: TrackId = TrackId(Guid(1));
@@ -64,7 +64,8 @@ fn capture(
         span,
         taken: 0,
         state: 1,
-        mode: Mode::Render,
+        source: Source::Render,
+        file: None,
         tempo: mort_map::tempo_fingerprint(tempo, span.end),
         hashes: hashes(&[]),
         inputs: tracks
@@ -145,7 +146,8 @@ fn a_capture_clips_and_replaces_older_frames() {
                 span,
                 taken: 0,
                 state: 2,
-                mode: Mode::Render,
+                source: Source::Render,
+                file: None,
                 tempo: mort_map::tempo_fingerprint(&tempo, 10.0),
                 hashes: hashes(&[]),
                 tracks: vec![],
@@ -275,4 +277,38 @@ fn the_sidecar_round_trips() {
         store::dir_for(std::path::Path::new("/songs/fen.rpp")),
         std::path::Path::new("/songs/fen.mort/captures")
     );
+}
+
+#[test]
+fn a_format_2_sidecar_still_loads() {
+    let dir = std::env::temp_dir().join(format!("mort-map-v2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let kick = "{00000000-0000-0000-0000-000000000003}";
+    let index = format!(
+        r#"{{"version": 2, "next": 2,
+            "captures": [{{"id": 1, "span": {{"start": 0.0, "end": 1.0}}, "taken": 5, "state": 1,
+                          "mode": "play", "tempo": 0, "hashes": {{}}, "inputs": {{}}}}],
+            "covers": {{"{kick}": [{{"capture": 1, "start": 0.0, "end": 1.0}}]}}}}"#
+    );
+    std::fs::write(dir.join("index.json"), index).unwrap();
+    let mut bytes = b"MORTFRM2".to_vec();
+    bytes.extend(1u32.to_le_bytes());
+    bytes.extend(3u128.to_le_bytes());
+    bytes.extend(2u32.to_le_bytes());
+    for i in 0..2u32 {
+        bytes.extend((f64::from(i) * 0.05).to_le_bytes());
+        bytes.extend(
+            Frame {
+                index: i,
+                ..Frame::default()
+            }
+            .to_le_bytes(),
+        );
+    }
+    std::fs::write(dir.join("1.frames"), bytes).unwrap();
+    let m = store::load(&dir).unwrap().unwrap();
+    assert_eq!(m.capture(1).unwrap().source, Source::Play);
+    assert_eq!(m.segments(KICK)[0].frames.len(), 2);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

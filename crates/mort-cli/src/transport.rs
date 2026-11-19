@@ -102,13 +102,12 @@ pub fn run(
         )
     } else if res["stopped_early"] == true {
         format!(
-            "played {} until stopped at {:.2}s, run {}",
+            "played {} until stopped at {:.2}s (heard by the map as an audition)",
             a.range,
             res["stopped_at"].as_f64().unwrap_or(0.0),
-            res["run"]
         )
     } else {
-        format!("played {}, run {}", a.range, res["run"])
+        format!("played {} (heard by the map as an audition)", a.range)
     };
     let after = client.call("bridge.status", Value::Null)?;
     Ok((vec![line], json!({ "job": s, "state": after["state"] })))

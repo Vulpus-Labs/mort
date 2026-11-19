@@ -366,17 +366,22 @@ pub fn frames(
                             .map(|f| f64::from(f.side_octaves[*k]))
                             .sum::<f64>()
                             / n),
-                        Feature::Scalar(get, Avg::Power) => db(fs
-                            .iter()
-                            .map(|f| 10f64.powf(f64::from(get(f)) / 10.0))
-                            .sum::<f64>()
-                            / n),
-                        Feature::Scalar(get, Avg::Max) => fs
-                            .iter()
-                            .map(|f| f64::from(get(f)))
-                            .fold(f64::MIN, f64::max),
-                        Feature::Scalar(get, Avg::Mean) => {
-                            fs.iter().map(|f| f64::from(get(f))).sum::<f64>() / n
+                        Feature::Scalar(get, avg) => {
+                            // NaN marks a value as unknown (ADR 0012 §2).
+                            let vs: Vec<f64> = fs
+                                .iter()
+                                .map(|f| f64::from(get(f)))
+                                .filter(|v| v.is_finite())
+                                .collect();
+                            let k = vs.len() as f64;
+                            match avg {
+                                _ if vs.is_empty() => f64::NAN,
+                                Avg::Power => {
+                                    db(vs.iter().map(|v| 10f64.powf(v / 10.0)).sum::<f64>() / k)
+                                }
+                                Avg::Max => vs.iter().copied().fold(f64::MIN, f64::max),
+                                Avg::Mean => vs.iter().sum::<f64>() / k,
+                            }
                         }
                     };
                     (x * 100.0).round() / 100.0
