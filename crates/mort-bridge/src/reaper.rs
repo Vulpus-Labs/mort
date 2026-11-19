@@ -26,16 +26,16 @@ use reaper_medium::{
     ProjectContext, Reaper, ReaperSession, ToggleAction, ToggleActionResult, UndoScope,
 };
 
-use mort_proto::model::SendInfo;
 use mort_proto::model::{
     ControlChange, EnvelopeInfo, EnvelopePoint, EnvelopeTarget, FxInfo, ItemInfo, Note, ParamInfo,
     ProjectInfo, Region, TrackInfo,
 };
+use mort_proto::model::{SendInfo, Shape};
 use mort_proto::{
     EnvelopeId, ErrorKind, ErrorObject, FxId, Guid, ItemId, TakeId, TempoMap, TrackId,
 };
 use mort_session::{NewTrack, Result, SendChange, Session, TrackChange, invalid, not_found};
-use reaper_low::raw::MediaTrack;
+use reaper_low::raw::{MediaTrack, TrackEnvelope};
 use std::os::raw::c_int;
 
 use crate::{chunk, raw};
@@ -116,6 +116,7 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
                 let mut d = Dispatcher::new(rx);
                 crate::methods::register_reads(&mut d);
                 crate::methods::register_edits(&mut d);
+                crate::methods::register_automation(&mut d);
                 d
             },
             _server: server,
@@ -399,6 +400,195 @@ fn check_pan(p: Option<f64>, subject: &impl ToString) -> Result<()> {
             "give a pan from −1 (left) to 1 (right)",
         )),
         _ => Ok(()),
+    }
+}
+
+/// Where an envelope lives, for finding or creating it.
+#[derive(Clone, Copy)]
+enum EnvLoc {
+    /// A track envelope by chunk name, and the action that shows (creates) it.
+    Chunk(&'static str, c_int),
+    /// An FX parameter's envelope.
+    Fx(c_int, c_int),
+    /// A send's volume envelope.
+    Send(c_int),
+}
+
+/// REAPER's actions *Track: Toggle track volume/pan envelope visible*.
+const SHOW_VOLUME_ENVELOPE: c_int = 40406;
+const SHOW_PAN_ENVELOPE: c_int = 40407;
+
+/// REAPER's pan envelopes run the other way to the track's pan: +1 is left.
+const PAN_ENVELOPE_SIGN: f64 = -1.0;
+
+fn shape_to(s: Shape) -> c_int {
+    match s {
+        Shape::Linear => 0,
+        Shape::Square => 1,
+        Shape::Slow => 2,
+        Shape::FastStart => 3,
+        Shape::FastEnd => 4,
+        Shape::Bezier => 5,
+    }
+}
+
+fn shape_from(s: c_int) -> Shape {
+    match s {
+        1 => Shape::Square,
+        2 => Shape::Slow,
+        3 => Shape::FastStart,
+        4 => Shape::FastEnd,
+        5 => Shape::Bezier,
+        _ => Shape::Linear,
+    }
+}
+
+impl Live {
+    fn locate(&self, target: EnvelopeTarget) -> Result<(*mut MediaTrack, EnvLoc)> {
+        match target {
+            EnvelopeTarget::Volume { track } => Ok((
+                self.find_track(track)?,
+                EnvLoc::Chunk("<VOLENV2", SHOW_VOLUME_ENVELOPE),
+            )),
+            EnvelopeTarget::Pan { track } => Ok((
+                self.find_track(track)?,
+                EnvLoc::Chunk("<PANENV2", SHOW_PAN_ENVELOPE),
+            )),
+            EnvelopeTarget::SendVolume { track, send } => {
+                let t = self.find_track(track)?;
+                let i = c_int::try_from(send)
+                    .ok()
+                    .filter(|i| *i < raw::send_count(self.low(), t))
+                    .ok_or_else(|| {
+                        not_found(
+                            "send",
+                            format!("{track} send {send}"),
+                            "list sends with `mort tracks`",
+                        )
+                    })?;
+                Ok((t, EnvLoc::Send(i)))
+            }
+            EnvelopeTarget::Param { fx, index } => {
+                let (t, i) = self.find_fx(fx)?;
+                let p = self.param_index(t, i, fx, index)?;
+                Ok((t, EnvLoc::Fx(i, p)))
+            }
+        }
+    }
+
+    fn existing(&self, t: *mut MediaTrack, loc: EnvLoc) -> Option<*mut TrackEnvelope> {
+        let r = self.low();
+        match loc {
+            // REAPER hands out a volume or pan envelope by chunk name even
+            // when the track has none; it exists only if the track lists it.
+            EnvLoc::Chunk(name, _) => {
+                raw::envelope_by_chunk_name(r, t, name).filter(|e| raw::envelopes(r, t).contains(e))
+            }
+            EnvLoc::Fx(fx, p) => raw::fx_envelope(r, t, fx, p, false),
+            EnvLoc::Send(i) => {
+                raw::send_envelope(r, t, i).filter(|e| raw::envelopes(r, t).contains(e))
+            }
+        }
+    }
+
+    /// What an envelope on track `t` controls, if it is one mort handles.
+    fn identify(&self, t: *mut MediaTrack, e: *mut TrackEnvelope) -> Option<EnvelopeTarget> {
+        let r = self.low();
+        let track = TrackId(raw::track_guid(r, t));
+        if let Some((fx, p)) = raw::envelope_fx_param(r, e) {
+            return Some(EnvelopeTarget::Param {
+                fx: FxId(raw::fx_guid(r, t, fx)?),
+                index: u32::try_from(p).ok()?,
+            });
+        }
+        if raw::envelope_by_chunk_name(r, t, "<VOLENV2") == Some(e) {
+            return Some(EnvelopeTarget::Volume { track });
+        }
+        if raw::envelope_by_chunk_name(r, t, "<PANENV2") == Some(e) {
+            return Some(EnvelopeTarget::Pan { track });
+        }
+        (0..raw::send_count(r, t))
+            .find(|i| raw::send_envelope(r, t, *i) == Some(e))
+            .and_then(|i| usize::try_from(i).ok())
+            .map(|send| EnvelopeTarget::SendVolume { track, send })
+    }
+
+    fn find_envelope(
+        &self,
+        id: EnvelopeId,
+    ) -> Result<(*mut MediaTrack, *mut TrackEnvelope, EnvelopeTarget)> {
+        let r = self.low();
+        self.all_tracks()
+            .into_iter()
+            .find_map(|t| {
+                raw::envelopes(r, t)
+                    .into_iter()
+                    .find(|e| raw::envelope_guid(r, *e) == Some(id.0))
+                    .and_then(|e| Some((t, e, self.identify(t, e)?)))
+            })
+            .ok_or_else(|| {
+                not_found(
+                    "envelope",
+                    id,
+                    "list envelopes with `mort automate <track>`",
+                )
+            })
+    }
+
+    fn param_range_of(&self, t: *mut MediaTrack, target: EnvelopeTarget) -> (f64, f64) {
+        match target {
+            EnvelopeTarget::Param { fx, index } => self
+                .find_fx(fx)
+                .ok()
+                .and_then(|(_, i)| {
+                    Some(raw::param_range(
+                        self.low(),
+                        t,
+                        i,
+                        c_int::try_from(index).ok()?,
+                    ))
+                })
+                .unwrap_or((0.0, 1.0)),
+            _ => (0.0, 1.0),
+        }
+    }
+
+    fn value_to_raw(
+        &self,
+        t: *mut MediaTrack,
+        e: *mut TrackEnvelope,
+        target: EnvelopeTarget,
+        v: f64,
+    ) -> f64 {
+        match target {
+            EnvelopeTarget::Volume { .. } | EnvelopeTarget::SendVolume { .. } => self
+                .low()
+                .ScaleToEnvelopeMode(raw::envelope_scaling(self.low(), e), v),
+            EnvelopeTarget::Pan { .. } => PAN_ENVELOPE_SIGN * v,
+            EnvelopeTarget::Param { .. } => {
+                let (lo, hi) = self.param_range_of(t, target);
+                lo + v * (hi - lo)
+            }
+        }
+    }
+
+    fn raw_to_value(
+        &self,
+        t: *mut MediaTrack,
+        e: *mut TrackEnvelope,
+        target: EnvelopeTarget,
+        v: f64,
+    ) -> f64 {
+        match target {
+            EnvelopeTarget::Volume { .. } | EnvelopeTarget::SendVolume { .. } => self
+                .low()
+                .ScaleFromEnvelopeMode(raw::envelope_scaling(self.low(), e), v),
+            EnvelopeTarget::Pan { .. } => PAN_ENVELOPE_SIGN * v,
+            EnvelopeTarget::Param { .. } => {
+                let (lo, hi) = self.param_range_of(t, target);
+                if hi > lo { (v - lo) / (hi - lo) } else { v }
+            }
+        }
     }
 }
 
@@ -805,24 +995,107 @@ impl Session for Live {
         }
     }
 
-    fn envelope(&mut self, _: EnvelopeTarget, _: bool) -> Result<Option<EnvelopeInfo>> {
-        Err(later("0007"))
+    fn envelope(&mut self, target: EnvelopeTarget, create: bool) -> Result<Option<EnvelopeInfo>> {
+        let (t, loc) = self.locate(target)?;
+        let r = self.low();
+        let mut env = self.existing(t, loc);
+        if env.is_none() && create {
+            env = match loc {
+                EnvLoc::Chunk(_, command) => {
+                    raw::action_on_track(r, t, command);
+                    self.existing(t, loc)
+                }
+                EnvLoc::Fx(fx, p) => raw::fx_envelope(r, t, fx, p, true),
+                EnvLoc::Send(_) => {
+                    return Err(invalid(
+                        "mort cannot create send envelopes yet",
+                        Some(format!("{target:?}")),
+                        "show the send's volume envelope once in REAPER (the send's button, then Volume envelope); mort can then write it",
+                    ));
+                }
+            };
+            if env.is_none() {
+                return Err(reaper_failed(
+                    "creating the envelope",
+                    &format!("{target:?}"),
+                ));
+            }
+        }
+        Ok(env
+            .and_then(|e| raw::envelope_guid(r, e))
+            .map(|g| EnvelopeInfo {
+                id: EnvelopeId(g),
+                target,
+            }))
     }
 
-    fn envelopes(&self, _: TrackId) -> Result<Vec<EnvelopeInfo>> {
-        Err(later("0007"))
+    fn format_envelope_value(&self, id: EnvelopeId, value: f64) -> Result<Option<String>> {
+        let (t, e, target) = self.find_envelope(id)?;
+        let s = raw::envelope_format(self.low(), e, self.value_to_raw(t, e, target, value));
+        Ok((!s.is_empty()).then_some(s))
     }
 
-    fn envelope_points(&self, _: EnvelopeId, _: f64, _: f64) -> Result<Vec<EnvelopePoint>> {
-        Err(later("0007"))
+    fn envelopes(&self, track: TrackId) -> Result<Vec<EnvelopeInfo>> {
+        let t = self.find_track(track)?;
+        let r = self.low();
+        Ok(raw::envelopes(r, t)
+            .into_iter()
+            .filter_map(|e| {
+                Some(EnvelopeInfo {
+                    id: EnvelopeId(raw::envelope_guid(r, e)?),
+                    target: self.identify(t, e)?,
+                })
+            })
+            .collect())
     }
 
-    fn insert_envelope_points(&mut self, _: EnvelopeId, _: &[EnvelopePoint]) -> Result<()> {
-        Err(later("0007"))
+    fn envelope_points(&self, id: EnvelopeId, start: f64, end: f64) -> Result<Vec<EnvelopePoint>> {
+        let (t, e, target) = self.find_envelope(id)?;
+        Ok(raw::envelope_points(self.low(), e)
+            .into_iter()
+            .filter(|(time, ..)| *time >= start && *time < end)
+            .map(|(time, v, shape, tension)| EnvelopePoint {
+                time,
+                value: self.raw_to_value(t, e, target, v),
+                shape: shape_from(shape),
+                tension,
+            })
+            .collect())
     }
 
-    fn delete_envelope_points(&mut self, _: EnvelopeId, _: f64, _: f64) -> Result<()> {
-        Err(later("0007"))
+    fn insert_envelope_points(&mut self, id: EnvelopeId, points: &[EnvelopePoint]) -> Result<()> {
+        let (t, e, target) = self.find_envelope(id)?;
+        let (lo, hi) = match target {
+            EnvelopeTarget::Volume { .. } | EnvelopeTarget::SendVolume { .. } => (0.0, MAX_GAIN),
+            EnvelopeTarget::Pan { .. } => (-1.0, 1.0),
+            EnvelopeTarget::Param { .. } => (0.0, 1.0),
+        };
+        if let Some(p) = points.iter().find(|p| !(lo..=hi).contains(&p.value)) {
+            return Err(invalid(
+                format!("value {} at {}s is outside {lo} to {hi}", p.value, p.time),
+                Some(id.to_string()),
+                "give values in the envelope's range",
+            ));
+        }
+        let raw_points: Vec<_> = points
+            .iter()
+            .map(|p| {
+                (
+                    p.time,
+                    self.value_to_raw(t, e, target, p.value),
+                    shape_to(p.shape),
+                    p.tension,
+                )
+            })
+            .collect();
+        raw::envelope_insert(self.low(), e, &raw_points);
+        Ok(())
+    }
+
+    fn delete_envelope_points(&mut self, id: EnvelopeId, start: f64, end: f64) -> Result<()> {
+        let (_, e, _) = self.find_envelope(id)?;
+        raw::envelope_delete(self.low(), e, start, end);
+        Ok(())
     }
 
     fn items(&self, id: TrackId) -> Result<Vec<ItemInfo>> {

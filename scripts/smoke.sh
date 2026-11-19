@@ -197,6 +197,50 @@ _, by = tracks()
 check("track.rm keeps folders", list(by) == ["Drums", "Kick", "Bass", "Verb"] and by["Kick"]["parent"] == by["Drums"]["id"]
       and by["Bass"]["parent"] is None, str([(n, t["parent"] is not None) for n, t in by.items()]))
 
+# --- Automation (ticket 0007) ---------------------------------------------
+bass_id = by["Bass"]["id"]
+vol = {"kind": "volume", "track": bass_id}
+r, e = edit("automation.write", {"target": vol, "points": [
+    {"time": 0.0, "value": 0.5, "shape": "slow"}, {"time": 2.0, "value": 1.0}]}, "smoke volume")
+pts = call("envelope.points", {"target": vol})["result"]["points"]
+check("volume envelope created and written",
+      e is None and [round(p["value"], 6) for p in pts] == [0.5, 1.0] and pts[0]["shape"] == "slow"
+      and pts[0]["display"].startswith("-6.0"),
+      str(e or [(p["time"], p["value"], p["display"], p["shape"]) for p in pts]))
+
+pan = {"kind": "pan", "track": bass_id}
+r, e = edit("automation.write", {"target": pan, "points": [{"time": 0.0, "value": -0.5}, {"time": 2.0, "value": 0.25}]}, "smoke pan")
+pts = call("envelope.points", {"target": pan})["result"]["points"]
+check("pan envelope: negative is left",
+      e is None and [round(p["value"], 6) for p in pts] == [-0.5, 0.25]
+      and "L" in pts[0]["display"] and "R" in pts[1]["display"],
+      str(e or [(p["value"], p["display"]) for p in pts]))
+
+bass_eq = by["Bass"]["fx"][0]["id"]
+par = {"kind": "param", "fx": bass_eq, "index": 4}
+r, e = edit("automation.write", {"target": par, "points": [{"time": 0.0, "value": 0.25}, {"time": 4.0, "value": 0.75}]}, "smoke param env")
+pts = call("envelope.points", {"target": par})["result"]["points"]
+check("parameter envelope", e is None and [round(p["value"], 6) for p in pts] == [0.25, 0.75],
+      str(e or [(p["value"], p["display"]) for p in pts]))
+
+r, e = edit("automation.write", {"target": vol, "points": [{"time": 1.0, "value": 0.25}]}, "smoke volume add")
+r, e = edit("automation.clear", {"target": vol, "start": 0.5, "end": 1.5}, "smoke clear")
+pts = call("envelope.points", {"target": vol})["result"]["points"]
+check("clear a range", e is None and [p["time"] for p in pts] == [0.0, 2.0], str(e or [p["time"] for p in pts]))
+
+envs = call("envelopes.list", {"track": bass_id})["result"]["envelopes"]
+kinds = sorted(x["target"]["kind"] for x in envs)
+check("envelopes.list", kinds == ["pan", "param", "volume"], str(kinds))
+
+r, e = edit("automation.write", {"target": {"kind": "send_volume", "track": by["Kick"]["id"], "send": 0},
+                                 "points": [{"time": 0.0, "value": 1.0}]}, "smoke send env")
+check("send envelope creation refused clearly", e is not None and "send's volume envelope" in e["data"]["fix"], str(e))
+
+r = call("undo")
+pts = call("envelope.points", {"target": vol})["result"]["points"]
+check("undo automation", r.get("result", {}).get("label") == "mort: smoke clear" and len(pts) == 3,
+      f"{r.get('result') or r.get('error')} {len(pts)} points")
+
 # Save the smoke project's copy so REAPER can quit without asking.
 import os
 r = call("project.save", {"path": os.path.join(os.path.dirname(sock), "smoke.rpp")})

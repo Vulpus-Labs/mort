@@ -3,6 +3,7 @@
 //! Exit codes: 0 success, 1 an error from the bridge (or a local failure),
 //! 2 a usage error, 3 no bridge running.
 
+mod automation;
 mod client;
 mod edits;
 mod install;
@@ -84,6 +85,9 @@ enum Command {
         #[arg(long)]
         normalised: bool,
     },
+
+    /// List or write automation: volume, pan, sends and FX parameters.
+    Automate(automation::Automate),
 
     /// Undo mort's last edit. Refuses if the last edit was not mort's.
     Undo,
@@ -243,6 +247,7 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
             track: None,
             action: None,
         } => Err(Outcome::Usage("name a track: `mort fx <track>`".into())),
+        Command::Automate(a) => edited(cli, |c| automation::run(c, a)),
         Command::Undo => edited(cli, |c| edits::undo(c, false)),
         Command::Redo => edited(cli, |c| edits::undo(c, true)),
         Command::Fx {

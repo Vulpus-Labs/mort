@@ -56,6 +56,7 @@ impl FakeBridge {
                 d.set_held(held);
                 mort_bridge::methods::register_reads(&mut d);
                 mort_bridge::methods::register_edits(&mut d);
+                mort_bridge::methods::register_automation(&mut d);
                 let mut session = FakeSession::new();
                 setup(&mut session);
                 ready_tx.send(()).unwrap();
@@ -582,4 +583,110 @@ fn undo_only_undoes_mort() {
         "{e}"
     );
     assert!(ok(&b.mort(&["tracks"])).contains("Theirs"));
+}
+
+#[test]
+fn automate_volume_pan_and_clear() {
+    let b = FakeBridge::start_with("automate", band);
+    let t = ok(&b.mort(&["automate", "bass", "volume"]));
+    assert!(t.starts_with("Bass volume: no envelope"), "{t}");
+
+    let t = ok(&b.mort(&[
+        "automate", "bass", "volume", "1.1=-6", "+4b=0", "3.1=-inf", "--shape", "slow",
+    ]));
+    assert!(t.starts_with("Bass volume: wrote 3 points"), "{t}");
+    assert!(t.contains("1.1  0.000s  -6.00dB  slow"), "{t}");
+    assert!(
+        t.contains("2.1  2.000s  0.00dB"),
+        "+4b chains from the point before: {t}"
+    );
+    assert!(t.contains("3.1  4.000s  -inf"), "{t}");
+
+    // Writing again over 1.1..2.1 replaces the points there, not the one after.
+    let t = ok(&b.mort(&["automate", "bass", "volume", "1.1=-12", "2.1=-3"]));
+    assert!(
+        t.contains("3 points") && t.contains("-12.00dB") && t.contains("-inf"),
+        "{t}"
+    );
+    let t = ok(&b.mort(&["automate", "bass", "volume", "1.3=-1", "--add"]));
+    assert!(t.contains("4 points"), "{t}");
+
+    let t = ok(&b.mort(&["automate", "bass", "volume", "--clear", "1.1..2.1"]));
+    assert!(
+        t.contains("cleared 1.1..2.1") && t.contains("2 points"),
+        "{t}"
+    );
+
+    let t = ok(&b.mort(&["automate", "bass", "pan", "1.1=L30", "+8b=R30"]));
+    assert!(t.contains("30%L") && t.contains("30%R"), "{t}");
+}
+
+#[test]
+fn automate_params_and_sends() {
+    let b = FakeBridge::start_with("automate-params", band);
+    let t = ok(&b.mort(&["automate", "bass", "eq/gain", "1.1=0.25", "2.1=0.75"]));
+    assert!(
+        t.starts_with("Bass VST: ReaEQ (Cockos) Gain-Band 1: wrote 2 points"),
+        "{t}"
+    );
+    let t = ok(&b.mort(&[
+        "automate",
+        "bass",
+        "eq/freq",
+        "1.1=300 Hz",
+        "2.1=2.4k",
+        "--text",
+    ]));
+    assert!(t.contains("2 points"), "{t}");
+    let v: Value =
+        serde_json::from_str(&stdout(&b.mort(&["--json", "automate", "bass", "eq/freq"]))).unwrap();
+    let vals: Vec<f64> = v["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["value"].as_f64().unwrap())
+        .collect();
+    // ReaEQ's fake frequency runs 20 Hz to 20 kHz on a log scale.
+    let hz = |n: f64| 20.0 * 1000f64.powf(n);
+    assert!(
+        (hz(vals[0]) - 300.0).abs() < 1.0 && (hz(vals[1]) - 2400.0).abs() < 5.0,
+        "{vals:?}"
+    );
+
+    let t = ok(&b.mort(&["automate", "kick", "send:verb", "1.1=-inf", "2.1=0"]));
+    assert!(t.starts_with("Kick send to Verb: wrote 2 points"), "{t}");
+    let o = b.mort(&["automate", "bass", "send:verb", "1.1=0"]);
+    assert!(
+        stderr(&o).contains("Bass has no send to Verb"),
+        "{}",
+        stderr(&o)
+    );
+
+    let o = b.mort(&["automate", "bass", "eq/gain", "1.1=3"]);
+    assert!(
+        stderr(&o).contains("not a normalised value"),
+        "{}",
+        stderr(&o)
+    );
+    let o = b.mort(&["automate", "bass", "width"]);
+    assert!(
+        stderr(&o).contains("`width` is not a target"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn clear_and_write_are_one_undo_point() {
+    let b = FakeBridge::start_with("automate-undo", band);
+    ok(&b.mort(&["automate", "bass", "volume", "1.1=-6", "3.1=0"]));
+    ok(&b.mort(&[
+        "automate", "bass", "volume", "--clear", "1.1..4.1", "2.1=-3",
+    ]));
+    let t = ok(&b.mort(&["undo"]));
+    assert!(
+        t.starts_with("undid mort: automate Bass volume: cleared 1.1..4.1, wrote 1 point"),
+        "{t}"
+    );
+    assert!(ok(&b.mort(&["automate", "bass", "volume"])).contains("2 points"));
 }

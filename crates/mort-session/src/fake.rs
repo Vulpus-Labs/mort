@@ -926,6 +926,31 @@ impl Session for FakeSession {
             .collect())
     }
 
+    fn format_envelope_value(&self, env: EnvelopeId, value: f64) -> Result<Option<String>> {
+        let (t, i) = self.envelope_location(env)?;
+        let target = self.get(t)?.envelopes[i].target;
+        Ok(Some(match target {
+            EnvelopeTarget::Volume { .. } | EnvelopeTarget::SendVolume { .. } => {
+                if value <= 0.0 {
+                    "-inf".into()
+                } else {
+                    format!("{:.2}dB", 20.0 * value.log10())
+                }
+            }
+            EnvelopeTarget::Pan { .. } => {
+                let pct = (value.abs() * 100.0).round();
+                if pct == 0.0 {
+                    "center".into()
+                } else if value < 0.0 {
+                    format!("{pct}%L")
+                } else {
+                    format!("{pct}%R")
+                }
+            }
+            EnvelopeTarget::Param { .. } => format!("{value:.3}"),
+        }))
+    }
+
     fn insert_envelope_points(&mut self, env: EnvelopeId, points: &[EnvelopePoint]) -> Result<()> {
         let e = self.envelope_mut(env)?;
         let (lo, hi) = envelope_range(e.target);

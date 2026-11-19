@@ -240,6 +240,14 @@ pub trait Session {
     /// `not_found`.
     fn envelope_points(&self, env: EnvelopeId, start: f64, end: f64) -> Result<Vec<EnvelopePoint>>;
 
+    /// How REAPER would display `value` on this envelope, such as `-6.02dB`
+    /// or `50%L`. `None` if it cannot say.
+    ///
+    /// # Errors
+    ///
+    /// `not_found`.
+    fn format_envelope_value(&self, env: EnvelopeId, value: f64) -> Result<Option<String>>;
+
     /// Adds points, keeping the envelope in time order.
     ///
     /// # Errors

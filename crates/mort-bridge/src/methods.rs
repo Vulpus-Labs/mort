@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use mort_proto::model::{EnvelopePoint, EnvelopeTarget};
 use mort_proto::{ErrorObject, FxId, Position, Range, TrackId};
 use mort_session::Session;
 
@@ -303,6 +304,110 @@ pub fn register_edits<S: Session + 'static>(d: &mut Dispatcher<S>) {
         s.set_param(p.fx, p.index, value)?;
         let display = s.format_param(p.fx, p.index, value)?.unwrap_or_default();
         Ok(json!({ "value": value, "display": display }))
+    });
+}
+
+// --- Automation (ticket 0007) -----------------------------------------------
+
+#[derive(Deserialize)]
+struct EnvelopeRead {
+    target: EnvelopeTarget,
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct AutomationWrite {
+    target: EnvelopeTarget,
+    points: Vec<EnvelopePoint>,
+    #[serde(default = "yes")]
+    replace: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+struct AutomationClear {
+    target: EnvelopeTarget,
+    start: f64,
+    end: f64,
+}
+
+#[derive(Deserialize)]
+struct ParamParse {
+    fx: FxId,
+    index: u32,
+    text: String,
+}
+
+/// A small distance past a point's time, so a range that ends at a point
+/// includes it.
+const PAST: f64 = 1e-9;
+
+/// Registers the automation methods of ticket 0007, and `param.parse`.
+pub fn register_automation<S: Session + 'static>(d: &mut Dispatcher<S>) {
+    read(d, "envelopes.list", |s: &S, p: TrackParams| {
+        Ok(json!({ "envelopes": s.envelopes(p.track)? }))
+    });
+    d.register("envelope.points", false, |ctx: &mut Ctx<'_, S>, params| {
+        Outcome::Value(
+            parse::<EnvelopeRead>("envelope.points", params).and_then(|p| {
+                let s = &mut *ctx.session;
+                let state = s.state();
+                let Some(env) = s.envelope(p.target, false)? else {
+                    return Ok(json!({ "envelope": null, "points": [], "state": state }));
+                };
+                let pts = s.envelope_points(
+                    env.id,
+                    p.start.unwrap_or(f64::NEG_INFINITY),
+                    p.end.unwrap_or(f64::INFINITY),
+                )?;
+                let points: Vec<Value> = pts
+                    .iter()
+                    .map(|pt| {
+                        let mut v = to_value(pt);
+                        v["display"] =
+                            json!(s.format_envelope_value(env.id, pt.value).ok().flatten());
+                        v
+                    })
+                    .collect();
+                Ok(json!({ "envelope": env, "points": points, "state": state }))
+            }),
+        )
+    });
+    edit(d, "automation.write", |s: &mut S, p: AutomationWrite| {
+        let env = s.envelope(p.target, true)?.ok_or_else(|| {
+            ErrorObject::internal("the session made no envelope when asked to create one")
+        })?;
+        if p.replace
+            && let (Some(first), Some(last)) = (
+                p.points.iter().map(|x| x.time).reduce(f64::min),
+                p.points.iter().map(|x| x.time).reduce(f64::max),
+            )
+        {
+            s.delete_envelope_points(env.id, first, last + PAST)?;
+        }
+        s.insert_envelope_points(env.id, &p.points)?;
+        Ok(json!({ "envelope": env, "written": p.points.len() }))
+    });
+    edit(
+        d,
+        "automation.clear",
+        |s: &mut S, p: AutomationClear| match s.envelope(p.target, false)? {
+            None => Ok(json!({ "envelope": null })),
+            Some(env) => {
+                s.delete_envelope_points(env.id, p.start, p.end)?;
+                Ok(json!({ "envelope": env }))
+            }
+        },
+    );
+    read(d, "param.parse", |s: &S, p: ParamParse| {
+        let value = value_for_text(s, p.fx, p.index, &p.text)?;
+        Ok(json!({ "value": value, "display": s.format_param(p.fx, p.index, value)? }))
     });
 }
 

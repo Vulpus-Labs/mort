@@ -9,7 +9,7 @@ use std::os::raw::{c_char, c_int};
 use std::ptr::null_mut;
 
 use reaper_low::Reaper;
-use reaper_low::raw::{GUID, MediaItem, MediaItem_Take, MediaTrack};
+use reaper_low::raw::{GUID, MediaItem, MediaItem_Take, MediaTrack, TrackEnvelope};
 
 use mort_proto::Guid;
 
@@ -436,6 +436,157 @@ pub fn redo_label(r: &Reaper) -> Option<String> {
     unsafe {
         let p = r.Undo_CanRedo2(null_mut());
         (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+    }
+}
+
+// --- Envelopes -------------------------------------------------------------
+
+/// A track envelope by its chunk name, such as `<VOLENV2`.
+pub fn envelope_by_chunk_name(
+    r: &Reaper,
+    t: *mut MediaTrack,
+    name: &str,
+) -> Option<*mut TrackEnvelope> {
+    let n = cstr(name);
+    // SAFETY: `t` is a live track.
+    let e = unsafe { r.GetTrackEnvelopeByChunkName(t, n.as_ptr()) };
+    (!e.is_null()).then_some(e)
+}
+
+/// An FX parameter's envelope, created if `create` is set.
+pub fn fx_envelope(
+    r: &Reaper,
+    t: *mut MediaTrack,
+    fx: c_int,
+    p: c_int,
+    create: bool,
+) -> Option<*mut TrackEnvelope> {
+    // SAFETY: `t` is a live track; bad indices give null.
+    let e = unsafe { r.GetFXEnvelope(t, fx, p, create) };
+    (!e.is_null()).then_some(e)
+}
+
+/// A send's volume envelope, if it has one.
+pub fn send_envelope(r: &Reaper, t: *mut MediaTrack, send: c_int) -> Option<*mut TrackEnvelope> {
+    let n = cstr("P_ENV:<VOLENV");
+    // SAFETY: `t` is a live track and `send` is below `send_count`.
+    let e = unsafe { r.GetSetTrackSendInfo(t, 0, send, n.as_ptr(), null_mut()) };
+    (!e.is_null()).then(|| e.cast::<TrackEnvelope>())
+}
+
+/// A track's envelopes, including its FX parameters'.
+pub fn envelopes(r: &Reaper, t: *mut MediaTrack) -> Vec<*mut TrackEnvelope> {
+    // SAFETY: `t` is a live track.
+    unsafe {
+        let n = r.CountTrackEnvelopes(t);
+        (0..n)
+            .map(|i| r.GetTrackEnvelope(t, i))
+            .filter(|e| !e.is_null())
+            .collect()
+    }
+}
+
+/// An envelope's GUID.
+pub fn envelope_guid(r: &Reaper, e: *mut TrackEnvelope) -> Option<Guid> {
+    let n = cstr("GUID");
+    // SAFETY: `e` is a live envelope.
+    read_buf(4096, |b, _| unsafe {
+        r.GetSetEnvelopeInfo_String(e, n.as_ptr(), b, false)
+    })
+    .and_then(|s| s.parse().ok())
+}
+
+/// The FX and parameter an envelope belongs to, if it is a parameter's.
+pub fn envelope_fx_param(r: &Reaper, e: *mut TrackEnvelope) -> Option<(c_int, c_int)> {
+    let (mut fx, mut p) = (-1, -1);
+    // SAFETY: `e` is a live envelope; the out pointers are valid.
+    unsafe { r.Envelope_GetParentTrack(e, &raw mut fx, &raw mut p) };
+    (fx >= 0 && p >= 0).then_some((fx, p))
+}
+
+/// The envelope's scaling mode: 0 none, 1 fader scaling.
+pub fn envelope_scaling(r: &Reaper, e: *mut TrackEnvelope) -> c_int {
+    // SAFETY: `e` is a live envelope.
+    unsafe { r.GetEnvelopeScalingMode(e) }
+}
+
+/// A raw envelope value as REAPER displays it.
+pub fn envelope_format(r: &Reaper, e: *mut TrackEnvelope, raw: f64) -> String {
+    // SAFETY: `e` is a live envelope.
+    read_buf(128, |b, n| unsafe {
+        r.Envelope_FormatValue(e, raw, b, n);
+        true
+    })
+    .unwrap_or_default()
+}
+
+/// One point: (time, raw value, shape, tension).
+pub fn envelope_points(r: &Reaper, env: *mut TrackEnvelope) -> Vec<(f64, f64, c_int, f64)> {
+    // SAFETY: `env` is a live envelope; the out pointers are valid.
+    unsafe {
+        let count = r.CountEnvelopePoints(env);
+        (0..count)
+            .filter_map(|idx| {
+                let (mut time, mut value, mut shape, mut tension, mut sel) =
+                    (0.0, 0.0, 0, 0.0, false);
+                r.GetEnvelopePoint(
+                    env,
+                    idx,
+                    &raw mut time,
+                    &raw mut value,
+                    &raw mut shape,
+                    &raw mut tension,
+                    &raw mut sel,
+                )
+                .then_some((time, value, shape, tension))
+            })
+            .collect()
+    }
+}
+
+/// Adds points (time, raw value, shape, tension), then sorts once.
+pub fn envelope_insert(r: &Reaper, e: *mut TrackEnvelope, points: &[(f64, f64, c_int, f64)]) {
+    let mut no_sort = true;
+    // SAFETY: `e` is a live envelope.
+    unsafe {
+        for &(t, v, s, k) in points {
+            r.InsertEnvelopePoint(e, t, v, s, k, false, &raw mut no_sort);
+        }
+        r.Envelope_SortPoints(e);
+    }
+}
+
+/// Removes the points from `start` to `end`.
+pub fn envelope_delete(r: &Reaper, e: *mut TrackEnvelope, start: f64, end: f64) {
+    // SAFETY: `e` is a live envelope.
+    unsafe {
+        r.DeleteEnvelopePointRange(e, start, end);
+    }
+}
+
+/// A parameter's native range, for parameter envelopes.
+pub fn param_range(r: &Reaper, t: *mut MediaTrack, fx: c_int, p: c_int) -> (f64, f64) {
+    let (mut lo, mut hi) = (0.0, 1.0);
+    // SAFETY: `t` is a live track; the out pointers are valid.
+    unsafe { r.TrackFX_GetParam(t, fx, p, &raw mut lo, &raw mut hi) };
+    (lo, hi)
+}
+
+/// Runs a REAPER action on `t` alone, keeping the track selection as it
+/// was.
+pub fn action_on_track(r: &Reaper, t: *mut MediaTrack, command: c_int) {
+    // SAFETY: main thread, current project; `t` and the selected tracks are
+    // live for the length of this call.
+    unsafe {
+        let n = r.CountSelectedTracks(null_mut());
+        let selected: Vec<*mut MediaTrack> =
+            (0..n).map(|i| r.GetSelectedTrack(null_mut(), i)).collect();
+        r.SetOnlyTrackSelected(t);
+        r.Main_OnCommandEx(command, 0, null_mut());
+        r.SetTrackSelected(t, false);
+        for s in selected {
+            r.SetTrackSelected(s, true);
+        }
     }
 }
 
