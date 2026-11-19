@@ -369,3 +369,98 @@ fn calibrate() {
         t["sections"][0]["master"]["density"]
     );
 }
+
+#[test]
+#[expect(clippy::many_single_char_names, reason = "short test bindings")]
+fn a_project_can_override_thresholds() {
+    let mut m = base();
+    m.add("Warm", None, &[pink(200.0, 500.0, -26.0)]);
+    let mut b = Bench::new(m.s);
+    b.measure(json!({ "start": 0.0, "end": 4.0 }));
+    let mud = |b: &mut Bench| -> Vec<Value> {
+        b.ok("map.findings", json!({ "kinds": ["mud"] }))["findings"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(mud(&mut b).len(), 1);
+
+    // Raised past the measured 2.9 dB, the finding goes; a little less and
+    // it stays, saying the threshold is the project's.
+    let r = b.ok(
+        "thresholds.set",
+        json!({ "name": "mud_excess", "value": 4.0 }),
+    );
+    assert_eq!(
+        r["file"],
+        Value::Null,
+        "an unsaved project keeps them in memory"
+    );
+    assert!(mud(&mut b).is_empty());
+    b.ok(
+        "thresholds.set",
+        json!({ "name": "mud_excess", "value": 2.5 }),
+    );
+    let f = mud(&mut b);
+    assert_eq!(f[0]["overridden"], json!(["mud_excess"]));
+    b.ok(
+        "thresholds.set",
+        json!({ "name": "mud_excess", "reset": true }),
+    );
+    let f = mud(&mut b);
+    assert_eq!(f.len(), 1);
+    assert!(f[0].get("overridden").is_none());
+
+    // The lowest severity shown hides weaker findings everywhere.
+    b.ok(
+        "thresholds.set",
+        json!({ "name": "min_severity", "value": 0.9 }),
+    );
+    assert!(mud(&mut b).is_empty());
+    let s = b.ok("map.summary", json!({}));
+    assert!(s["sections"][0]["findings"].get("mud").is_none(), "{s}");
+
+    // Mistakes name the key and what it allows.
+    let e = b
+        .call("thresholds.set", json!({ "name": "mud", "value": 1.0 }))
+        .unwrap_err();
+    assert!(e.message.contains("no threshold `mud`"), "{e:?}");
+    let e = b
+        .call(
+            "thresholds.set",
+            json!({ "name": "low_corr", "value": 3.0 }),
+        )
+        .unwrap_err();
+    assert!(e.message.contains("from -1 to 1"), "{e:?}");
+
+    // Saved with the project, read back by a bridge that opens it.
+    let dir = std::env::temp_dir().join(format!("mort-thresholds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    b.s.set_path(Some(dir.join("song.rpp").to_str().unwrap()));
+    let r = b.ok("thresholds.get", json!({}));
+    let file = dir.join("song.mort/thresholds.toml");
+    assert_eq!(r["file"], json!(file));
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("min_severity = 0.9")
+    );
+    let mut again = Bench::new(b.s.clone());
+    let r = again.ok("thresholds.get", json!({}));
+    assert!((r["min_severity"].as_f64().unwrap() - 0.9).abs() < 1e-9);
+
+    // A broken file is reported, and the defaults used.
+    std::fs::write(&file, "mud_excess = \"high\"\n").unwrap();
+    let mut broken = Bench::new(b.s.clone());
+    let r = broken.ok("thresholds.get", json!({}));
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("`mud_excess` must be a number"),
+        "{r}"
+    );
+    assert!(r["min_severity"].as_f64().unwrap().abs() < 1e-9);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

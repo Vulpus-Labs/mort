@@ -133,6 +133,9 @@ enum Command {
     /// loudness jumps, wide low end, register clashes), worst first.
     Findings(report::Findings),
 
+    /// Show the finding thresholds, or override them for this project.
+    Thresholds(report::Thresholds),
+
     /// Show one track's features by section, and its share of its bus.
     Report(report::Report),
 
@@ -345,6 +348,7 @@ fn step(cmd: &Command, c: &mut Client) -> Result<(Vec<String>, Value), Outcome> 
         Command::Summary(a) => report::summary(c, a)?,
         Command::Findings(a) => report::findings(c, a)?,
         Command::Report(a) => report::report(c, a)?,
+        Command::Thresholds(a) => report::thresholds(c, a)?,
         Command::Frames(a) => report::frames(c, a)?,
         Command::Compare(a) => report::compare(c, a)?,
         Command::Undo => edits::undo(c, false)?,

@@ -147,18 +147,7 @@ pub struct Findings {
 /// Runs `mort findings`.
 pub fn findings(client: &mut Client, args: &Findings) -> Result<(Vec<String>, Value), Failure> {
     if args.thresholds {
-        let r = client.call("map.thresholds", Value::Null)?;
-        let mut rows = vec![vec!["name".to_owned(), "value".into(), "why".into()]];
-        for t in r["thresholds"].as_array().into_iter().flatten() {
-            rows.push(vec![
-                t["name"].as_str().unwrap_or("?").to_owned(),
-                format!("{} {}", t["value"], t["unit"].as_str().unwrap_or(""))
-                    .trim()
-                    .to_owned(),
-                t["reason"].as_str().unwrap_or("").to_owned(),
-            ]);
-        }
-        return Ok((show::table(&rows), r));
+        return thresholds(client, &Thresholds { action: None });
     }
     let mut p = with_range(client, args.range.as_deref(), json!({ "all": args.all }))?;
     if !args.kind.is_empty() {
@@ -459,6 +448,89 @@ pub fn compare(client: &mut Client, args: &Compare) -> Result<(Vec<String>, Valu
                 f(&x["severity"])
             ));
         }
+    }
+    Ok((lines, r))
+}
+
+/// `mort thresholds` arguments.
+#[derive(Args)]
+pub struct Thresholds {
+    #[command(subcommand)]
+    action: Option<ThresholdCmd>,
+}
+
+/// `mort thresholds` actions; with none, lists them.
+#[derive(clap::Subcommand)]
+pub enum ThresholdCmd {
+    /// Override a threshold for this project, or `min_severity`, the
+    /// lowest severity a finding needs to be shown.
+    Set {
+        /// The threshold, as `mort thresholds` names it.
+        key: String,
+        /// Its new value.
+        #[arg(allow_hyphen_values = true)]
+        value: f64,
+    },
+    /// Go back to the default.
+    Reset {
+        /// The threshold.
+        key: String,
+    },
+}
+
+fn num(x: f64) -> String {
+    let t = format!("{x:.3}");
+    let t = t.trim_end_matches('0').trim_end_matches('.');
+    if t == "-0" { "0".into() } else { t.to_owned() }
+}
+
+/// Runs `mort thresholds`.
+pub fn thresholds(client: &mut Client, args: &Thresholds) -> Result<(Vec<String>, Value), Failure> {
+    let mut lines = Vec::new();
+    let r = match &args.action {
+        None => client.call("thresholds.get", Value::Null)?,
+        Some(ThresholdCmd::Set { key, value }) => {
+            let r = client.call("thresholds.set", json!({ "name": key, "value": value }))?;
+            lines.push(format!("{key} = {}", num(*value)));
+            r
+        }
+        Some(ThresholdCmd::Reset { key }) => {
+            let r = client.call("thresholds.set", json!({ "name": key, "reset": true }))?;
+            lines.push(format!("{key} back to its default"));
+            r
+        }
+    };
+    let mut rows = vec![vec![
+        "name".to_owned(),
+        "value".into(),
+        "default".into(),
+        "why".into(),
+    ]];
+    for t in r["thresholds"].as_array().into_iter().flatten() {
+        let unit = t["unit"].as_str().unwrap_or("");
+        let value = format!("{} {unit}", num(f(&t["value"]))).trim().to_owned();
+        rows.push(vec![
+            t["name"].as_str().unwrap_or("?").to_owned(),
+            if t["overridden"] == true {
+                format!("{value} *")
+            } else {
+                value
+            },
+            num(f(&t["default"])),
+            t["reason"].as_str().unwrap_or("").to_owned(),
+        ]);
+    }
+    lines.extend(show::table(&rows));
+    lines.push(format!(
+        "min_severity {} (findings below it are not shown); * overridden for this project",
+        num(f(&r["min_severity"]))
+    ));
+    lines.push(match r["file"].as_str() {
+        Some(p) => format!("overrides in {p}"),
+        None => "overrides in memory only: save the project to keep them".into(),
+    });
+    if let Some(e) = r["error"].as_str() {
+        lines.push(format!("warning: {e}"));
     }
     Ok((lines, r))
 }

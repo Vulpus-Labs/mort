@@ -22,6 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use mort_map::analysis::{TrackMeta, View, sections};
+use mort_map::thresholds::Overrides;
 use mort_map::{
     Capture, MixMap, Mode, Now, Routing, Span, TimedFrame, findings, fnv, query, store,
 };
@@ -38,6 +39,12 @@ pub struct Store {
     pub(crate) map: MixMap,
     path: Option<PathBuf>,
     save_error: Option<String>,
+    /// The project's threshold overrides (ADR 0012 §7).
+    pub(crate) overrides: Overrides,
+    /// Why `thresholds.toml` could not be read, if it could not.
+    thresholds_error: Option<String>,
+    /// Grows with every change to the map or the thresholds (ADR 0012 §8).
+    pub(crate) version: u64,
 }
 
 impl Store {
@@ -52,6 +59,61 @@ impl Store {
         self.path.as_deref().map(store::dir_for)
     }
 
+    /// `<project>.mort/thresholds.toml`.
+    fn thresholds_file(&self) -> Option<PathBuf> {
+        self.dir()
+            .and_then(|d| d.parent().map(|p| p.join("thresholds.toml")))
+    }
+
+    /// Reads the overrides beside the project, or writes those held in
+    /// memory there if it has none.
+    fn sync_thresholds(&mut self) {
+        let Some(file) = self.thresholds_file() else {
+            return;
+        };
+        match std::fs::read_to_string(&file) {
+            Ok(text) => match Overrides::from_toml(&text) {
+                Ok(o) => {
+                    self.overrides = o;
+                    self.thresholds_error = None;
+                }
+                Err(e) => {
+                    self.overrides = Overrides::default();
+                    self.thresholds_error = Some(format!(
+                        "{}: {e}; using the default thresholds",
+                        file.display()
+                    ));
+                }
+            },
+            Err(_) if self.overrides == Overrides::default() => {}
+            Err(_) => self.write_thresholds(),
+        }
+        self.version += 1;
+    }
+
+    fn write_thresholds(&mut self) {
+        let Some(file) = self.thresholds_file() else {
+            return;
+        };
+        let r = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&file, self.overrides.to_toml()));
+        self.thresholds_error = r.err().map(|e| format!("{}: {e}", file.display()));
+    }
+
+    /// Changes an override (`value`) or removes it (`None`), saving it
+    /// beside the project if it has been saved.
+    pub(crate) fn set_threshold(&mut self, name: &str, value: Option<f64>) -> Result<(), String> {
+        match value {
+            Some(v) => self.overrides.set(name, v)?,
+            None => self.overrides.reset(name)?,
+        }
+        self.write_thresholds();
+        self.version += 1;
+        Ok(())
+    }
+
     /// Follows the project file; see the module docs.
     pub(crate) fn sync<S: Session>(&mut self, s: &S) {
         let path = s.project().path.map(PathBuf::from);
@@ -59,6 +121,8 @@ impl Store {
             return;
         }
         self.path = path;
+        self.version += 1;
+        self.sync_thresholds();
         if let Some(dir) = self.dir() {
             match store::load(&dir) {
                 Ok(Some(m)) => {
@@ -469,7 +533,7 @@ fn with_view<S: Session, T>(
     s: &S,
     store: &Shared,
     q: &RangeQuery,
-    f: impl FnOnce(&View<'_>) -> Result<T, ErrorObject>,
+    f: impl FnOnce(&View<'_>, &Overrides) -> Result<T, ErrorObject>,
 ) -> Result<T, ErrorObject> {
     let mut st = store.borrow_mut();
     st.sync(s);
@@ -487,7 +551,46 @@ fn with_view<S: Session, T>(
         tracks: track_meta(s)?,
         sections: sections(&s.regions(), range),
     };
-    f(&view)
+    f(&view, &st.overrides)
+}
+
+#[derive(Deserialize)]
+struct ThresholdSet {
+    name: String,
+    #[serde(default)]
+    value: Option<f64>,
+    #[serde(default)]
+    reset: bool,
+}
+
+/// Every threshold with its default, the project's value and the reason,
+/// and where the overrides live.
+fn thresholds_json(store: &Store) -> Value {
+    let lim = store.overrides.limits();
+    let rows: Vec<Value> = mort_map::thresholds::TABLE
+        .iter()
+        .map(|t| {
+            let value = lim.get(t.name).unwrap_or(t.value);
+            json!({
+                "name": t.name,
+                "default": t.value,
+                "value": value,
+                "overridden": store.overrides.values.contains_key(t.name),
+                "overridable": t.overridable(),
+                "unit": t.unit,
+                "min": t.min,
+                "max": t.max,
+                "reason": t.reason,
+            })
+        })
+        .collect();
+    json!({
+        "thresholds": rows,
+        "min_severity": store.overrides.min_severity(),
+        "file": store.thresholds_file(),
+        "error": store.thresholds_error,
+        "version": store.version,
+    })
 }
 
 /// The two captures to compare: those given, or the latest capture over
@@ -582,7 +685,11 @@ fn compare_query<S: Session>(s: &S, st: &Shared, q: &RangeQuery) -> Result<Value
         tracks: view_of(&store.map, second),
         sections: secs,
     };
-    let c = mort_map::compare::compare(&va, &vb, &mort_map::thresholds::Limits::DEFAULT);
+    let mut c = mort_map::compare::compare(&va, &vb, &store.overrides.limits());
+    let min = store.overrides.min_severity();
+    c.appeared.retain(|f| f.severity >= min);
+    c.gone.retain(|f| f.severity >= min);
+    c.kept.retain(|k| k.finding.severity >= min || k.was >= min);
     let mut v = serde_json::to_value(&c).expect("comparisons serialise");
     v["a"] = json!(first);
     v["b"] = json!(second);
@@ -603,13 +710,16 @@ fn the_track<S: Session>(s: &S, q: &RangeQuery) -> Result<TrackId, ErrorObject> 
 fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared) {
     let st = Rc::clone(store);
     read(d, "map.findings", move |s: &S, q: RangeQuery| {
-        with_view(s, &st, &q, |v| {
+        with_view(s, &st, &q, |v, o| {
             let lim = if q.all {
                 mort_map::thresholds::Limits::ALL
             } else {
-                mort_map::thresholds::Limits::DEFAULT
+                o.limits()
             };
             let mut fs = findings::findings(v, &lim);
+            if !q.all {
+                fs.retain(|f| f.severity >= o.min_severity());
+            }
             if let Some(kinds) = &q.kinds {
                 fs.retain(|f| kinds.contains(&f.kind));
             }
@@ -618,15 +728,16 @@ fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared)
     });
     let st = Rc::clone(store);
     read(d, "map.summary", move |s: &S, q: RangeQuery| {
-        with_view(s, &st, &q, |v| {
-            let fs = findings::findings(v, &mort_map::thresholds::Limits::DEFAULT);
+        with_view(s, &st, &q, |v, o| {
+            let mut fs = findings::findings(v, &o.limits());
+            fs.retain(|f| f.severity >= o.min_severity());
             Ok(json!({ "sections": query::summary(v, &fs), "findings": fs.len() }))
         })
     });
     let st = Rc::clone(store);
     read(d, "map.track", move |s: &S, q: RangeQuery| {
         let t = the_track(s, &q)?;
-        with_view(s, &st, &q, |v| {
+        with_view(s, &st, &q, |v, _| {
             let name = v.meta(t).map(|m| m.name.clone());
             Ok(json!({ "track": t, "name": name, "sections": query::track(v, t) }))
         })
@@ -643,7 +754,7 @@ fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared)
                 ),
             ));
         }
-        with_view(s, &st, &q, |v| {
+        with_view(s, &st, &q, |v, _| {
             let range = v.sections.first().map_or(Span::new(0.0, 0.0), |a| {
                 a.span.union(v.sections.last().map_or(a.span, |b| b.span))
             });
@@ -658,20 +769,50 @@ fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared)
     read(d, "map.compare", move |s: &S, q: RangeQuery| {
         compare_query(s, &st, &q)
     });
-    read(d, "map.thresholds", |_: &S, _: NoParams| {
-        let rows: Vec<Value> = mort_map::thresholds::TABLE
-            .iter()
-            .map(
-                |t| json!({ "name": t.name, "value": t.value, "unit": t.unit, "reason": t.reason }),
-            )
-            .collect();
-        Ok(json!({ "thresholds": rows }))
+    let st = Rc::clone(store);
+    read(d, "thresholds.get", move |s: &S, _: NoParams| {
+        let mut store = st.borrow_mut();
+        store.sync(s);
+        Ok(thresholds_json(&store))
     });
+    let st = Rc::clone(store);
+    d.register(
+        "thresholds.set",
+        false,
+        move |ctx: &mut Ctx<'_, S>, params| {
+            let r = parse::<ThresholdSet>("thresholds.set", params).and_then(|p| {
+                let mut store = st.borrow_mut();
+                store.sync(&*ctx.session);
+                let value = if p.reset {
+                    None
+                } else {
+                    Some(p.value.ok_or_else(|| {
+                        invalid(
+                            format!("give a `value` for `{}`, or `reset: true`", p.name),
+                            "see the thresholds with `mort thresholds`",
+                        )
+                    })?)
+                };
+                store.set_threshold(&p.name, value).map_err(|e| {
+                    mort_session::invalid(
+                        e,
+                        Some(p.name.clone()),
+                        "see the thresholds with `mort thresholds`",
+                    )
+                })?;
+                let mut v = thresholds_json(&store);
+                v["state"] = json!(ctx.session.state());
+                Ok(v)
+            });
+            Outcome::Value(r)
+        },
+    );
 }
 
 /// Registers `measure` and `map.status` (ticket 0012), and the queries
 /// `map.summary`, `map.track`, `map.frames`, `map.findings` and
-/// `map.thresholds` (ticket 0013), and `map.compare` (ticket 0014).
+/// (ticket 0013), `map.compare` (ticket 0014), and `thresholds.get` and
+/// `thresholds.set` (ticket 0019).
 pub fn register_measure<S: Session + 'static>(d: &mut Dispatcher<S>) {
     let shared: Shared = Rc::new(RefCell::new(Store::new()));
     register_queries(d, &shared);

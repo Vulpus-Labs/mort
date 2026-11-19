@@ -1289,3 +1289,33 @@ fn regions_and_markers() {
     let t = ok(&b.mort(&["undo"]));
     assert!(t.contains("mort: add marker drop"), "{t}");
 }
+
+#[test]
+fn thresholds_set_and_reset() {
+    let b = FakeBridge::start_with("thresholds", |_| {});
+    let t = ok(&b.mort(&["thresholds"]));
+    assert!(
+        t.contains("mud_excess") && t.contains("overrides in memory only"),
+        "{t}"
+    );
+    let t = ok(&b.mort(&["thresholds", "set", "headroom", "-2"]));
+    assert!(t.starts_with("headroom = -2\n"), "{t}");
+    let line = t
+        .lines()
+        .find(|l| l.starts_with("headroom") && l.contains("dBTP"))
+        .unwrap();
+    assert!(line.contains("-2 dBTP *"), "{t}");
+    let t = ok(&b.mort(&["thresholds", "reset", "headroom"]));
+    assert!(
+        t.lines()
+            .any(|l| l.starts_with("headroom") && l.contains("-1 dBTP ")),
+        "{t}"
+    );
+    let o = b.mort(&["thresholds", "set", "nonsense", "1"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("no threshold `nonsense`"),
+        "{}",
+        stderr(&o)
+    );
+}

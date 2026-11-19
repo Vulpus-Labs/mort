@@ -93,6 +93,12 @@ down from a section to a track to a band.
    - `mort findings --all` reports every measurement as if it were a
      finding, so a caller can see how close each one is to its
      threshold.
+   - A project can override any finding threshold, within the range the
+     table gives it, and set the lowest severity shown (`min_severity`),
+     in `<project>.mort/thresholds.toml` (ADR 0012 §7, ticket 0019).
+     Every finding lists the overridden thresholds it used. The onset
+     detector's constant defines a feature, not a finding, and cannot be
+     overridden.
 4. **Queries** come at three levels:
    - `summary(range)`: one row per section, with loudness, tilt, width,
      density and finding counts;

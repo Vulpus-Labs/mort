@@ -11,10 +11,7 @@ use mort_proto::TrackId;
 
 use crate::Span;
 use crate::analysis::{Section, TILT_BANDS, TrackMeta, View, centre, db, tilt_fit};
-use crate::thresholds::{
-    BLAME_SHARE, CLASH_BELOW, LOW_CORR, LOW_FLOOR_DB, Limits, MASK_BUS_DB, MASK_FLOOR_DB,
-    MASK_SPREAD_DB, TILT_BAND_FLOOR_DB,
-};
+use crate::thresholds::{CLASH_BELOW, Limits, used_by};
 
 /// A kind of finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -85,6 +82,9 @@ pub struct Finding {
     pub suggest: String,
     /// Whether any of the data behind it is stale.
     pub stale: bool,
+    /// The thresholds it used that the project overrides (ADR 0012 §7).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overridden: Vec<String>,
 }
 
 fn round1(x: f64) -> f64 {
@@ -146,10 +146,10 @@ fn masking(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Finding>) {
                         let eb = db(f64::from(fb.mid_bands[k]));
                         let ea = db(f64::from(fa.mid_bands[k]) * a.gain * a.gain);
                         let ec = db(f64::from(fc.mid_bands[k]) * c.gain * c.gain);
-                        if eb > MASK_FLOOR_DB
-                            && (ea - ec).abs() <= MASK_SPREAD_DB
-                            && ea >= eb - MASK_BUS_DB
-                            && ec >= eb - MASK_BUS_DB
+                        if eb > lim.mask_floor
+                            && (ea - ec).abs() <= lim.mask_spread
+                            && ea >= eb - lim.mask_bus
+                            && ec >= eb - lim.mask_bus
                         {
                             hits[k] += 1;
                             sums[k].0 += ea;
@@ -162,7 +162,9 @@ fn masking(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Finding>) {
                     .map(|k| (k, hits[k] as f64 / total))
                     .filter(|(_, f)| *f > lim.mask_fraction)
                     .collect();
-                if flagged.is_empty() || flagged.len() < lim.mask_bands {
+                #[expect(clippy::cast_precision_loss, reason = "a few bands")]
+                let few = (flagged.len() as f64) < lim.mask_bands;
+                if flagged.is_empty() || few {
                     continue;
                 }
                 let top = flagged.iter().map(|x| x.1).fold(0.0, f64::max);
@@ -197,7 +199,8 @@ fn masking(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Finding>) {
                         bus.name
                     ),
                     bands,
-                    stale: v.stale(a.id, sec.span).is_some()
+                    overridden: vec![],
+            stale: v.stale(a.id, sec.span).is_some()
                         || v.stale(c.id, sec.span).is_some()
                         || v.stale(bus.id, sec.span).is_some(),
                 });
@@ -218,7 +221,7 @@ fn excess(v: &View<'_>, lim: &Limits, sec: &Section, kind: Kind, out: &mut Vec<F
         };
         #[expect(clippy::cast_precision_loss, reason = "five bands")]
         let level = db(test.iter().map(|k| st.bands[*k]).sum::<f64>() / test.len() as f64);
-        if level < TILT_BAND_FLOOR_DB {
+        if level < lim.tilt_band_floor {
             continue;
         }
         let (slope, icept) = tilt_fit(&st.bands, TILT_BANDS.0, TILT_BANDS.1, &test);
@@ -246,7 +249,7 @@ fn excess(v: &View<'_>, lim: &Limits, sec: &Section, kind: Kind, out: &mut Vec<F
         shares.sort_by(|a, b| b.1.total_cmp(&a.1));
         let blamed: Vec<&(&TrackMeta, f64)> = shares
             .iter()
-            .filter(|x| sum > 0.0 && x.1 / sum >= BLAME_SHARE)
+            .filter(|x| sum > 0.0 && x.1 / sum >= lim.blame_share)
             .take(4)
             .collect();
         let bands: Vec<f64> = test.iter().map(|k| centre(*k)).collect();
@@ -286,6 +289,7 @@ fn excess(v: &View<'_>, lim: &Limits, sec: &Section, kind: Kind, out: &mut Vec<F
                 "{} has {:.1} dB more {what} than its tilt predicts: {fix} {who}",
                 bus.name, over
             ),
+            overridden: vec![],
             stale: v.stale(bus.id, sec.span).is_some(),
         });
     }
@@ -336,6 +340,7 @@ fn headroom(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Finding>) {
                 "measure": if is_master { "true_peak_dbtp" } else { "sample_peak_dbfs" },
             }),
             suggest,
+            overridden: vec![],
             stale: v.stale(bus.id, sec.span).is_some(),
         });
     }
@@ -388,6 +393,7 @@ fn loudness_jumps(v: &View<'_>, lim: &Limits, out: &mut Vec<Finding>) {
                 "short-term loudness moves {jump:+.1} LU into {}: if that is not meant, ride the level across the boundary",
                 next.name
             ),
+            overridden: vec![],
             stale: v.stale(v.master, prev.span).is_some() || v.stale(v.master, next.span).is_some(),
         });
     }
@@ -407,7 +413,7 @@ fn low_end_width(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Findin
         let frames = v.frames(t.id, sec.span);
         let low: Vec<f64> = frames
             .iter()
-            .filter(|(_, f)| db(low_energy(f)) > LOW_FLOOR_DB)
+            .filter(|(_, f)| db(low_energy(f)) > lim.low_floor)
             .map(|(_, f)| f64::from(f.correlation_low))
             .collect();
         if low.is_empty() {
@@ -416,7 +422,7 @@ fn low_end_width(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Findin
         #[expect(clippy::cast_precision_loss, reason = "frame counts are small")]
         let n = low.len() as f64;
         #[expect(clippy::cast_precision_loss, reason = "frame counts are small")]
-        let fraction = low.iter().filter(|c| **c < LOW_CORR).count() as f64 / n;
+        let fraction = low.iter().filter(|c| **c < lim.low_corr).count() as f64 / n;
         if fraction <= lim.low_fraction {
             continue;
         }
@@ -427,7 +433,7 @@ fn low_end_width(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Findin
             span: sec.span,
             tracks: vec![t.id],
             bands: (0..=8).map(centre).collect(),
-            severity: ((LOW_CORR - mean) / (1.0 + LOW_CORR)).clamp(0.05, 1.0),
+            severity: ((lim.low_corr - mean) / (1.0 + lim.low_corr)).clamp(0.05, 1.0),
             evidence: json!({
                 "correlation_low": round2(mean),
                 "fraction": round2(fraction),
@@ -436,6 +442,7 @@ fn low_end_width(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Findin
                 "{}'s low end is wide (correlation {mean:.2} below 150 Hz): make it mono below about 150 Hz",
                 t.name
             ),
+            overridden: vec![],
             stale: v.stale(t.id, sec.span).is_some(),
         });
     }
@@ -494,6 +501,7 @@ fn register_clash(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Findi
                     note_name(q)
                 ),
                 stale: false,
+                overridden: vec![],
             });
         }
     }
@@ -525,6 +533,11 @@ pub fn findings(v: &View<'_>, lim: &Limits) -> Vec<Finding> {
     }
     for f in &mut out {
         f.severity = round2(f.severity);
+        f.overridden = used_by(f.kind)
+            .iter()
+            .filter(|k| lim.get(k) != Limits::DEFAULT.get(k))
+            .map(|k| (*k).to_owned())
+            .collect();
     }
     out
 }
