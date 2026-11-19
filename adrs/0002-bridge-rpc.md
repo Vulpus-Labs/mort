@@ -36,6 +36,12 @@ example an agent and a person's shell.
    - `kind`: `not_found`, `stale`, `invalid`, `busy` or `reaper`
    - `subject`: the id of the element the error is about
    - `fix`: one sentence saying what to do
+7. **Batch references.** In a `batch`, any string parameter of the form
+   `$N.field.field…` is replaced by that part of call N's result, so a
+   call can use what an earlier call in the batch made, such as `$0.track`
+   for a track that call 0 added. `mort run` relies on this (ADR 0009 §4).
+   A reference to a call that has not run, or to a field its result lacks,
+   fails the batch.
 
 ## Consequences
 

@@ -99,9 +99,12 @@ pub fn run(client: &mut Client, cmd: &Measure) -> Result<(Vec<String>, Value), F
             t["why"].as_str().unwrap_or("?")
         ));
     }
-    if let Some(d) = res["dropped"].as_array().filter(|d| !d.is_empty()) {
+    if let Some(d) = res["superseded"].as_array().filter(|d| !d.is_empty()) {
         let ids: Vec<String> = d.iter().map(Value::to_string).collect();
-        lines.push(format!("replaced captures {}", ids.join(", ")));
+        lines.push(format!(
+            "superseded captures {} (kept for `mort compare`)",
+            ids.join(", ")
+        ));
     }
     lines.push(saved_line(res));
     let after = client.call("bridge.status", Value::Null)?;

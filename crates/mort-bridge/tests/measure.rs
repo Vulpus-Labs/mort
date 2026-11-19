@@ -106,7 +106,7 @@ fn measure_edit_and_remeasure_what_is_stale() {
         2
     );
     let r = b.measure(json!({ "start": 0.0, "end": 4.0 }));
-    assert_eq!(r["dropped"].as_array().unwrap().len(), 2);
+    assert_eq!(r["superseded"].as_array().unwrap().len(), 2);
 
     // A tempo change makes everything stale.
     b.s.set_tempo_map(SteppedTempoMap::constant(100.0, 4, 4));
@@ -156,10 +156,11 @@ fn the_map_is_saved_beside_the_project_and_reloads() {
     assert!(sidecar.join("index.json").exists());
     assert!(sidecar.join("1.frames").exists());
 
-    // A new measurement is written as it is made.
+    // A new measurement is written as it is made; the one it supersedes
+    // is kept for comparing.
     let r = b.measure(json!({ "start": 0.0, "end": 2.0 }));
     assert_eq!(r["capture"], 2);
-    assert!(sidecar.join("2.frames").exists() && !sidecar.join("1.frames").exists());
+    assert!(sidecar.join("2.frames").exists() && sidecar.join("1.frames").exists());
 
     // A bridge started on the saved project finds the map.
     let mut again = Bench::new(b.s.clone());

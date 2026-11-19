@@ -471,6 +471,29 @@ pub fn set(
     let list = client.call("tracks.list", Value::Null)?;
     let t = resolve::track(&list, track)?;
     let f = resolve::fx(t, fx)?;
+    // An FX a script adds earlier in the same batch does not exist yet:
+    // the bridge finds the parameter by name when the batch runs.
+    if f["id"].as_str().is_some_and(|id| id.starts_with('$')) {
+        let mut body = json!({ "fx": f["id"] });
+        match param.parse::<u32>() {
+            Ok(i) => body["index"] = json!(i),
+            Err(_) => body["param"] = json!(param),
+        }
+        if normalised {
+            let v: f64 = value
+                .parse()
+                .map_err(|_| usage(format!("`{value}` is not a number from 0 to 1")))?;
+            body["value"] = json!(v);
+        } else {
+            body["text"] = json!(value);
+        }
+        let summary = format!("{} {} {param} = {value}", name(t), name(f));
+        let r = send_edit(client, "param.set", body, &summary, &list["state"])?;
+        return Ok((
+            vec![format!("{} on {}: {param} = {value}", name(f), name(t))],
+            r,
+        ));
+    }
     let ps = client.call("fx.params", json!({ "fx": f["id"] }))?;
     let params = ps["params"].as_array().map_or(&[][..], Vec::as_slice);
     let p = if let Ok(i) = param.parse::<u64>() {

@@ -2,10 +2,13 @@
 //!
 //! A [`Capture`] is what one run measured: its range, when, the project's
 //! state, and a hash of every track's audio chunk at the time. The
-//! [`MixMap`] keeps, for each track, the latest frames over each stretch
-//! of time, as [`Segment`]s that point back at their capture. A new
-//! capture over a range replaces older frames there on the tracks it
-//! measured; captures left with no frames are dropped.
+//! [`MixMap`] keeps each capture's frames as they were taken, and for each
+//! track a list of covers: which capture's frames are current over each
+//! stretch of time. A new capture over a range takes over the covers there
+//! on the tracks it measured. Captures no cover points at any more are
+//! superseded; the latest [`HISTORY`] of them are kept, so that
+//! [`MixMap::as_of`] can rebuild the map as it was after any recent
+//! capture, for comparing (ADR 0007 §5).
 //!
 //! Staleness (ADR 0006 §3) compares a segment's capture with the project
 //! [`Now`]: the segment is stale if the tempo map changed, or if the track
@@ -14,6 +17,7 @@
 //! Nothing here depends on REAPER.
 
 pub mod analysis;
+pub mod compare;
 pub mod findings;
 pub mod query;
 pub mod store;
@@ -115,18 +119,35 @@ pub struct Capture {
     pub hashes: BTreeMap<TrackId, u64>,
     /// For each track measured, everything routed into it then.
     pub inputs: BTreeMap<TrackId, Vec<TrackId>>,
+    /// Every track's gain, bus and MIDI notes when the run started, so
+    /// that the map as of this capture is read with the mix as it was.
+    #[serde(default)]
+    pub tracks: Vec<analysis::TrackMeta>,
 }
 
 /// Frames over a stretch of one track's timeline, from one capture.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Segment {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Segment<'a> {
     /// The capture they came from.
     pub capture: u64,
     /// The time they cover.
     pub span: Span,
     /// The frames, in time order, each starting inside `span`.
-    pub frames: Vec<TimedFrame>,
+    pub frames: &'a [TimedFrame],
 }
+
+/// Which capture's frames are current over a stretch of a track.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Cover {
+    /// The capture.
+    pub capture: u64,
+    /// The stretch.
+    #[serde(flatten)]
+    pub span: Span,
+}
+
+/// How many superseded captures the map keeps for comparing.
+pub const HISTORY: usize = 8;
 
 /// Where each track's audio goes: its parent folder or the master, and its
 /// sends.
@@ -261,7 +282,10 @@ pub struct Added {
     pub id: u64,
     /// Frames kept per track, after clipping to the range.
     pub frames: BTreeMap<TrackId, usize>,
-    /// Captures that no longer hold any frames and were dropped.
+    /// Captures now wholly superseded: no track's current data comes
+    /// from them. They are kept for comparing, up to [`HISTORY`].
+    pub superseded: Vec<u64>,
+    /// Superseded captures forgotten to keep within [`HISTORY`].
     pub dropped: Vec<u64>,
 }
 
@@ -283,9 +307,19 @@ pub struct Covered {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MixMap {
     captures: BTreeMap<u64, Capture>,
-    tracks: BTreeMap<TrackId, Vec<Segment>>,
+    frames: BTreeMap<u64, BTreeMap<TrackId, Vec<TimedFrame>>>,
+    covers: BTreeMap<TrackId, Vec<Cover>>,
     next: u64,
-    touched: BTreeSet<u64>,
+    added: BTreeSet<u64>,
+    changed: bool,
+}
+
+/// The frames of `fs` that start inside `span`, as a slice: `fs` is in
+/// time order.
+fn slice(fs: &[TimedFrame], span: Span) -> &[TimedFrame] {
+    let a = fs.partition_point(|f| f.start < span.start - STAMP_SLACK);
+    let b = fs.partition_point(|f| f.start < span.end - STAMP_SLACK);
+    &fs[a..b.max(a)]
 }
 
 impl MixMap {
@@ -298,115 +332,200 @@ impl MixMap {
         }
     }
 
-    /// Whether the map holds nothing.
+    /// Whether the map holds nothing current.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.captures.is_empty()
+        self.covers.is_empty()
     }
 
-    /// The captures that hold frames, oldest first.
+    /// The captures that hold current frames, oldest first.
     pub fn captures(&self) -> impl Iterator<Item = &Capture> {
+        let used = self.used();
+        self.captures.values().filter(move |c| used.contains(&c.id))
+    }
+
+    /// Every capture kept, current or superseded, oldest first.
+    pub fn all_captures(&self) -> impl Iterator<Item = &Capture> {
         self.captures.values()
     }
 
-    /// A capture by id.
+    /// A capture by id, current or superseded.
     #[must_use]
     pub fn capture(&self, id: u64) -> Option<&Capture> {
         self.captures.get(&id)
     }
 
-    /// The tracks with map data.
-    pub fn tracks(&self) -> impl Iterator<Item = TrackId> + '_ {
-        self.tracks.keys().copied()
+    /// The tracks a capture measured.
+    pub fn measured(&self, id: u64) -> impl Iterator<Item = TrackId> + '_ {
+        self.frames
+            .get(&id)
+            .into_iter()
+            .flat_map(|m| m.keys().copied())
     }
 
-    /// A track's segments, in time order.
+    /// A capture's frames for one track, as taken.
     #[must_use]
-    pub fn segments(&self, t: TrackId) -> &[Segment] {
-        self.tracks.get(&t).map_or(&[], Vec::as_slice)
+    pub fn capture_frames(&self, id: u64, t: TrackId) -> &[TimedFrame] {
+        self.frames
+            .get(&id)
+            .and_then(|m| m.get(&t))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The tracks with current data.
+    pub fn tracks(&self) -> impl Iterator<Item = TrackId> + '_ {
+        self.covers.keys().copied()
+    }
+
+    /// A track's covers, in time order.
+    #[must_use]
+    pub fn covers(&self, t: TrackId) -> &[Cover] {
+        self.covers.get(&t).map_or(&[], Vec::as_slice)
+    }
+
+    /// A track's current segments, in time order.
+    #[must_use]
+    pub fn segments(&self, t: TrackId) -> Vec<Segment<'_>> {
+        self.covers(t)
+            .iter()
+            .map(|c| Segment {
+                capture: c.capture,
+                span: c.span,
+                frames: slice(self.capture_frames(c.capture, t), c.span),
+            })
+            .collect()
+    }
+
+    fn used(&self) -> BTreeSet<u64> {
+        self.covers.values().flatten().map(|c| c.capture).collect()
+    }
+
+    /// Lays `span` of capture `id` over track `t`'s covers.
+    fn cover(&mut self, t: TrackId, id: u64, span: Span) {
+        let covers = self.covers.entry(t).or_default();
+        let mut next = Vec::with_capacity(covers.len() + 2);
+        for c in covers.drain(..) {
+            if c.span.intersect(span).is_none() {
+                next.push(c);
+                continue;
+            }
+            for part in [
+                Span::new(c.span.start, c.span.end.min(span.start)),
+                Span::new(c.span.start.max(span.end), c.span.end),
+            ] {
+                if part.end > part.start {
+                    next.push(Cover {
+                        capture: c.capture,
+                        span: part,
+                    });
+                }
+            }
+        }
+        next.push(Cover { capture: id, span });
+        next.sort_by(|a, b| a.span.start.total_cmp(&b.span.start));
+        *covers = next;
     }
 
     /// Adds a capture with its frames by track. The capture's `id` is
     /// replaced with a fresh one. Frames that start outside the capture's
-    /// range are dropped (ADR 0006 §5); a track's older frames over the
-    /// range are replaced, even if it has no frames now.
+    /// range are dropped (ADR 0006 §5). The capture becomes current over
+    /// its range on every track it has frames for, even none.
     pub fn add(
         &mut self,
         mut capture: Capture,
         frames: BTreeMap<TrackId, Vec<TimedFrame>>,
     ) -> Added {
+        let before = self.used();
         let id = self.next.max(1);
         self.next = id + 1;
         capture.id = id;
         let span = capture.span;
         let mut kept = BTreeMap::new();
+        let mut own = BTreeMap::new();
         for (t, mut fs) in frames {
             fs.retain(|f| span.holds_frame(f.start));
             fs.sort_by(|a, b| a.start.total_cmp(&b.start));
-            let segs = self.tracks.entry(t).or_default();
-            let mut next = Vec::with_capacity(segs.len() + 2);
-            for s in segs.drain(..) {
-                if s.span.intersect(span).is_none() {
-                    next.push(s);
-                    continue;
-                }
-                self.touched.insert(s.capture);
-                for part in [
-                    Span::new(s.span.start, s.span.end.min(span.start)),
-                    Span::new(s.span.start.max(span.end), s.span.end),
-                ] {
-                    if part.end > part.start {
-                        next.push(Segment {
-                            capture: s.capture,
-                            span: part,
-                            frames: s
-                                .frames
-                                .iter()
-                                .filter(|f| part.holds_frame(f.start))
-                                .copied()
-                                .collect(),
-                        });
-                    }
-                }
-            }
             kept.insert(t, fs.len());
-            next.push(Segment {
-                capture: id,
-                span,
-                frames: fs,
-            });
-            next.sort_by(|a, b| a.span.start.total_cmp(&b.span.start));
-            *segs = next;
+            self.cover(t, id, span);
+            own.insert(t, fs);
         }
+        self.frames.insert(id, own);
         self.captures.insert(id, capture);
-        self.touched.insert(id);
+        self.added.insert(id);
+        self.changed = true;
+        let after = self.used();
+        let superseded = before.difference(&after).copied().collect();
         Added {
             id,
             frames: kept,
-            dropped: self.drop_empty(),
+            superseded,
+            dropped: self.trim(),
         }
     }
 
-    /// Forgets the data of tracks `keep` refuses, and any capture left
-    /// empty. Returns the captures dropped.
-    pub fn retain_tracks(&mut self, keep: impl Fn(TrackId) -> bool) -> Vec<u64> {
-        self.tracks.retain(|t, _| keep(*t));
-        self.drop_empty()
-    }
-
-    fn drop_empty(&mut self) -> Vec<u64> {
-        let used: BTreeSet<u64> = self.tracks.values().flatten().map(|s| s.capture).collect();
-        let dropped: Vec<u64> = self
+    /// Forgets superseded captures beyond the latest [`HISTORY`]. Returns
+    /// those forgotten.
+    fn trim(&mut self) -> Vec<u64> {
+        let used = self.used();
+        let old: Vec<u64> = self
             .captures
             .keys()
             .filter(|c| !used.contains(c))
             .copied()
             .collect();
+        let n = old.len().saturating_sub(HISTORY);
+        let dropped: Vec<u64> = old[..n].to_vec();
         for c in &dropped {
             self.captures.remove(c);
-            self.touched.remove(c);
+            self.frames.remove(c);
+            self.added.remove(c);
+            self.changed = true;
         }
         dropped
+    }
+
+    /// Forgets the data of tracks `keep` refuses, current and past, and
+    /// any capture left with nothing. Returns the captures forgotten.
+    pub fn retain_tracks(&mut self, keep: impl Fn(TrackId) -> bool) -> Vec<u64> {
+        self.covers.retain(|t, _| keep(*t));
+        for m in self.frames.values_mut() {
+            m.retain(|t, _| keep(*t));
+        }
+        let empty: Vec<u64> = self
+            .frames
+            .iter()
+            .filter(|(_, m)| m.is_empty())
+            .map(|(c, _)| *c)
+            .collect();
+        for c in &empty {
+            self.captures.remove(c);
+            self.frames.remove(c);
+            self.added.remove(c);
+        }
+        self.changed = true;
+        empty
+    }
+
+    /// The map as it was just after capture `id`, within `range`: every
+    /// capture kept up to `id` laid over the tracks it measured, in order.
+    /// Captures already forgotten leave gaps.
+    #[must_use]
+    pub fn as_of(&self, id: u64, range: Span) -> MixMap {
+        let mut m = MixMap::new();
+        for (cid, c) in self.captures.range(..=id) {
+            let Some(span) = c.span.intersect(range) else {
+                continue;
+            };
+            let mut own = BTreeMap::new();
+            for (t, fs) in &self.frames[cid] {
+                m.cover(*t, *cid, span);
+                own.insert(*t, slice(fs, span).to_vec());
+            }
+            m.frames.insert(*cid, own);
+            m.captures.insert(*cid, c.clone());
+        }
+        m.next = id + 1;
+        m
     }
 
     /// Why track `t`'s data from capture `capture` is stale, or `None`
@@ -433,10 +552,11 @@ impl MixMap {
     /// Each track's covered stretches and whether they are stale.
     #[must_use]
     pub fn coverage(&self, now: &Now<'_>) -> BTreeMap<TrackId, Vec<Covered>> {
-        self.tracks
-            .iter()
-            .map(|(t, segs)| {
-                let spans = segs
+        self.covers
+            .keys()
+            .map(|t| {
+                let spans = self
+                    .segments(*t)
                     .iter()
                     .map(|s| Covered {
                         span: s.span,
@@ -468,16 +588,23 @@ impl MixMap {
         out
     }
 
-    /// Captures changed since the last [`MixMap::untouch`]: added, or with
-    /// frames replaced.
+    /// Captures added since the last [`MixMap::mark_saved`], whose frames
+    /// the sidecar has not yet written.
     #[must_use]
-    pub fn touched(&self) -> &BTreeSet<u64> {
-        &self.touched
+    pub fn unsaved(&self) -> &BTreeSet<u64> {
+        &self.added
     }
 
-    /// Marks every capture as saved.
-    pub fn untouch(&mut self) {
-        self.touched.clear();
+    /// Whether anything changed since the last [`MixMap::mark_saved`].
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// Marks everything as saved.
+    pub fn mark_saved(&mut self) {
+        self.added.clear();
+        self.changed = false;
     }
 
     /// The next capture id; for the sidecar.
@@ -486,26 +613,39 @@ impl MixMap {
         self.next
     }
 
-    /// A map from saved parts. Segments whose capture is missing are
+    /// Every track's covers; for the sidecar.
+    #[must_use]
+    pub fn all_covers(&self) -> &BTreeMap<TrackId, Vec<Cover>> {
+        &self.covers
+    }
+
+    /// A map from saved parts. Covers whose capture is missing are
     /// dropped.
     #[must_use]
     pub fn from_parts(
         next: u64,
         captures: Vec<Capture>,
-        tracks: BTreeMap<TrackId, Vec<Segment>>,
+        frames: BTreeMap<u64, BTreeMap<TrackId, Vec<TimedFrame>>>,
+        covers: BTreeMap<TrackId, Vec<Cover>>,
     ) -> Self {
         let mut m = Self {
-            captures: captures.into_iter().map(|c| (c.id, c)).collect(),
-            tracks,
+            captures: captures
+                .into_iter()
+                .filter(|c| frames.contains_key(&c.id))
+                .map(|c| (c.id, c))
+                .collect(),
+            frames,
+            covers,
             next: next.max(1),
-            touched: BTreeSet::new(),
+            added: BTreeSet::new(),
+            changed: false,
         };
-        for segs in m.tracks.values_mut() {
-            segs.retain(|s| m.captures.contains_key(&s.capture));
-            segs.sort_by(|a, b| a.span.start.total_cmp(&b.span.start));
+        m.frames.retain(|c, _| m.captures.contains_key(c));
+        for cs in m.covers.values_mut() {
+            cs.retain(|c| m.captures.contains_key(&c.capture));
+            cs.sort_by(|a, b| a.span.start.total_cmp(&b.span.start));
         }
-        m.tracks.retain(|_, s| !s.is_empty());
-        m.drop_empty();
+        m.covers.retain(|_, c| !c.is_empty());
         m
     }
 }

@@ -12,6 +12,7 @@ mod midi;
 mod probes;
 mod report;
 mod resolve;
+mod script;
 mod show;
 mod smf;
 mod transport;
@@ -134,6 +135,14 @@ enum Command {
     /// Show a track's raw frames over a range, resampled.
     Frames(report::Frames),
 
+    /// Compare the mix before and after an edit: two captures' features by
+    /// section and track, and the findings that appeared or went.
+    Compare(report::Compare),
+
+    /// Run a script of mort commands (a `.kdl` file, or `-` for stdin).
+    /// Edits in a row go to REAPER as one batch, with one undo point.
+    Run(script::Run),
+
     /// Undo mort's last edit. Refuses if the last edit was not mort's.
     Undo,
 
@@ -200,7 +209,7 @@ impl From<Failure> for Outcome {
     }
 }
 
-fn connect(cli: &Cli) -> Result<(Client, Value), Failure> {
+pub(crate) fn connect(cli: &Cli) -> Result<(Client, Value), Failure> {
     let path = match &cli.socket {
         Some(p) => p.clone(),
         None => client::current_socket()?,
@@ -208,18 +217,8 @@ fn connect(cli: &Cli) -> Result<(Client, Value), Failure> {
     Client::connect(&path)
 }
 
-/// Runs an edit command and prints its lines, or its raw result.
-fn edited(
-    cli: &Cli,
-    f: impl FnOnce(&mut Client) -> Result<(Vec<String>, Value), Failure>,
-) -> Result<Vec<String>, Outcome> {
-    let (mut c, _) = connect(cli)?;
-    let (lines, result) = f(&mut c)?;
-    Ok(with_state(cli, &result, lines))
-}
-
 /// Text lines with the state last (ADR 0009 §2), or the raw result.
-fn with_state(cli: &Cli, result: &Value, mut lines: Vec<String>) -> Vec<String> {
+pub(crate) fn with_state(cli: &Cli, result: &Value, mut lines: Vec<String>) -> Vec<String> {
     if cli.json {
         return vec![result.to_string()];
     }
@@ -235,7 +234,6 @@ fn yes_no(v: &Value) -> &'static str {
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "one short arm per command")]
 fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
     match &cli.command {
         Command::Status => {
@@ -272,68 +270,7 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
                 serde_json::to_string_pretty(&r).expect("values serialise")
             }])
         }
-        Command::Tracks => {
-            let (mut c, _) = connect(cli)?;
-            let list = c.call("tracks.list", Value::Null)?;
-            Ok(with_state(cli, &list, show::tracks(&list)))
-        }
-        Command::Track(cmd) => edited(cli, |c| edits::track(c, cmd)),
-        Command::Send(cmd) => edited(cli, |c| edits::send(c, cmd)),
-        Command::Fx {
-            action: Some(cmd), ..
-        } => edited(cli, |c| edits::fx(c, cmd)),
-        Command::Set {
-            track,
-            fx,
-            param,
-            value,
-            normalised,
-        } => edited(cli, |c| edits::set(c, track, fx, param, value, *normalised)),
-        Command::Fx {
-            track: None,
-            action: None,
-        } => Err(Outcome::Usage("name a track: `mort fx <track>`".into())),
-        Command::Automate(a) => edited(cli, |c| automation::run(c, a)),
-        Command::Midi(m) => edited(cli, |c| midi::run(c, m)),
-        Command::Play(a) => edited(cli, |c| transport::run(c, a, false)),
-        Command::Render(a) => edited(cli, |c| transport::run(c, a, true)),
-        Command::Stop => edited(cli, transport::stop),
-        Command::Probes { action } => edited(cli, |c| probes::run(c, action.as_ref())),
-        Command::Measure(m) => edited(cli, |c| measure::run(c, m)),
-        Command::Map => edited(cli, measure::map),
-        Command::Summary(a) => edited(cli, |c| report::summary(c, a)),
-        Command::Findings(a) => edited(cli, |c| report::findings(c, a)),
-        Command::Report(a) => edited(cli, |c| report::report(c, a)),
-        Command::Frames(a) => edited(cli, |c| report::frames(c, a)),
-        Command::Undo => edited(cli, |c| edits::undo(c, false)),
-        Command::Redo => edited(cli, |c| edits::undo(c, true)),
-        Command::Fx {
-            track: Some(track),
-            action: None,
-        } => {
-            let (mut c, _) = connect(cli)?;
-            let list = c.call("tracks.list", Value::Null)?;
-            let t = resolve::track(&list, track)?;
-            if cli.json {
-                return Ok(vec![
-                    json!({ "track": t, "state": list["state"] }).to_string(),
-                ]);
-            }
-            Ok(with_state(cli, &list, show::fx(t)))
-        }
-        Command::Params { track, fx, filter } => {
-            let (mut c, _) = connect(cli)?;
-            let list = c.call("tracks.list", Value::Null)?;
-            let t = resolve::track(&list, track)?;
-            let f = resolve::fx(t, fx)?;
-            let r = c.call("fx.params", json!({ "fx": f["id"] }))?;
-            let name = t["name"].as_str().unwrap_or("?");
-            Ok(with_state(
-                cli,
-                &r,
-                show::params(&r, name, filter.as_deref()),
-            ))
-        }
+        Command::Run(r) => script::run(cli, r),
         Command::Install {
             from,
             user_plugins,
@@ -343,7 +280,76 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
             user_plugins.as_ref(),
             clap_dir.as_ref(),
         )?),
+        other => {
+            let (mut c, _) = connect(cli)?;
+            let (lines, value) = step(other, &mut c)?;
+            Ok(with_state(cli, &value, lines))
+        }
     }
+}
+
+/// Runs a command that needs only a connection: its text lines and its
+/// result, whose `state` the last line shows. Scripts run their steps
+/// through this too.
+fn step(cmd: &Command, c: &mut Client) -> Result<(Vec<String>, Value), Outcome> {
+    Ok(match cmd {
+        Command::Tracks => {
+            let list = c.call("tracks.list", Value::Null)?;
+            (show::tracks(&list), list)
+        }
+        Command::Track(cmd) => edits::track(c, cmd)?,
+        Command::Send(cmd) => edits::send(c, cmd)?,
+        Command::Fx {
+            action: Some(cmd), ..
+        } => edits::fx(c, cmd)?,
+        Command::Set {
+            track,
+            fx,
+            param,
+            value,
+            normalised,
+        } => edits::set(c, track, fx, param, value, *normalised)?,
+        Command::Fx {
+            track: None,
+            action: None,
+        } => return Err(Outcome::Usage("name a track: `mort fx <track>`".into())),
+        Command::Fx {
+            track: Some(track),
+            action: None,
+        } => {
+            let list = c.call("tracks.list", Value::Null)?;
+            let t = resolve::track(&list, track)?;
+            (show::fx(t), json!({ "track": t, "state": list["state"] }))
+        }
+        Command::Params { track, fx, filter } => {
+            let list = c.call("tracks.list", Value::Null)?;
+            let t = resolve::track(&list, track)?;
+            let f = resolve::fx(t, fx)?;
+            let r = c.call("fx.params", json!({ "fx": f["id"] }))?;
+            let name = t["name"].as_str().unwrap_or("?");
+            (show::params(&r, name, filter.as_deref()), r)
+        }
+        Command::Automate(a) => automation::run(c, a)?,
+        Command::Midi(m) => midi::run(c, m)?,
+        Command::Play(a) => transport::run(c, a, false)?,
+        Command::Render(a) => transport::run(c, a, true)?,
+        Command::Stop => transport::stop(c)?,
+        Command::Probes { action } => probes::run(c, action.as_ref())?,
+        Command::Measure(m) => measure::run(c, m)?,
+        Command::Map => measure::map(c)?,
+        Command::Summary(a) => report::summary(c, a)?,
+        Command::Findings(a) => report::findings(c, a)?,
+        Command::Report(a) => report::report(c, a)?,
+        Command::Frames(a) => report::frames(c, a)?,
+        Command::Compare(a) => report::compare(c, a)?,
+        Command::Undo => edits::undo(c, false)?,
+        Command::Redo => edits::undo(c, true)?,
+        Command::Status | Command::Call { .. } | Command::Install { .. } | Command::Run(_) => {
+            return Err(Outcome::Usage(
+                "status, call, install and run are not script steps".into(),
+            ));
+        }
+    })
 }
 
 fn install_cmd(

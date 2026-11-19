@@ -226,11 +226,74 @@ struct SaveParams {
 #[derive(Deserialize)]
 struct ParamSet {
     fx: FxId,
-    index: u32,
+    #[serde(default)]
+    index: Option<u32>,
+    /// A parameter name, instead of `index`: matched exactly (ignoring
+    /// case), or as the one name starting with it, or containing it.
+    #[serde(default)]
+    param: Option<String>,
     #[serde(default)]
     value: Option<f64>,
     #[serde(default)]
     text: Option<String>,
+}
+
+/// The parameter `index` names, or the one named `name`.
+fn param_index<S: Session>(
+    s: &S,
+    fx: FxId,
+    index: Option<u32>,
+    name: Option<&str>,
+) -> Result<u32, ErrorObject> {
+    let want = match (index, name) {
+        (Some(i), None) => return Ok(i),
+        (None, Some(n)) => n.to_lowercase(),
+        _ => {
+            return Err(mort_session::invalid(
+                "give `index` or `param`, not both or neither",
+                Some(fx.to_string()),
+                "name the parameter by its number or its name",
+            ));
+        }
+    };
+    let params = s.params(fx)?;
+    if let Some(p) = params.iter().find(|p| p.name.to_lowercase() == want) {
+        return Ok(p.index);
+    }
+    // Names that start with it, or failing that, contain it.
+    let starts: Vec<_> = params
+        .iter()
+        .filter(|p| p.name.to_lowercase().starts_with(&want))
+        .collect();
+    let hits: Vec<_> = if starts.is_empty() {
+        params
+            .iter()
+            .filter(|p| p.name.to_lowercase().contains(&want))
+            .collect()
+    } else {
+        starts
+    };
+    match hits.as_slice() {
+        [p] => Ok(p.index),
+        [] => Err(mort_session::not_found(
+            "parameter",
+            format!("{fx} `{want}`"),
+            "list parameters with `mort params <track> <fx>`",
+        )),
+        many => Err(mort_session::invalid(
+            format!(
+                "`{want}` matches {} parameters: {}",
+                many.len(),
+                many.iter()
+                    .take(5)
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some(fx.to_string()),
+            "give more of the name, or its number",
+        )),
+    }
 }
 
 /// Registers the edit methods of ticket 0006, and `fx.state`.
@@ -309,9 +372,10 @@ pub fn register_edits<S: Session + 'static>(d: &mut Dispatcher<S>) {
         Ok(json!({ "chunk": s.fx_state(p.fx)? }))
     });
     edit(d, "param.set", |s: &mut S, p: ParamSet| {
+        let index = param_index(s, p.fx, p.index, p.param.as_deref())?;
         let value = match (p.value, &p.text) {
             (Some(v), None) => v,
-            (None, Some(t)) => value_for_text(s, p.fx, p.index, t)?,
+            (None, Some(t)) => value_for_text(s, p.fx, index, t)?,
             _ => {
                 return Err(mort_session::invalid(
                     "give `value` or `text`, not both or neither",
@@ -320,9 +384,9 @@ pub fn register_edits<S: Session + 'static>(d: &mut Dispatcher<S>) {
                 ));
             }
         };
-        s.set_param(p.fx, p.index, value)?;
-        let display = s.format_param(p.fx, p.index, value)?.unwrap_or_default();
-        Ok(json!({ "value": value, "display": display }))
+        s.set_param(p.fx, index, value)?;
+        let display = s.format_param(p.fx, index, value)?.unwrap_or_default();
+        Ok(json!({ "index": index, "value": value, "display": display }))
     });
 }
 

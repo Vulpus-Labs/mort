@@ -53,19 +53,25 @@ longer match the project are worse than none.
    render (about 150 ms of frames for a render in REAPER 7.67). A capture
    keeps only frames that start inside its range.
 6. **Persistence.** Captures are saved in a sidecar directory next to the
-   project file: `song.rpp` keeps them in `song.mort/captures/`. The
-   directory holds `index.json` (format version, next capture id, each
-   capture's metadata) and one `<id>.frames` file per capture, holding
-   its segments with their frames in little-endian binary (the layout is
-   in `mort_map::store`). Captures are written as they are made. When
+   project file: `song.rpp` keeps them in `song.mort/captures/`.
+   - `index.json` holds the format version, the next capture id, each
+     kept capture's metadata (including each track's gain, bus and MIDI
+     notes at the time), and each track's covers. A cover says which
+     capture is current over which stretch.
+   - Each capture has one `<id>.frames` file with the frames it took, in
+     little-endian binary (the layout is in `mort_map::store`). A
+     capture's frames never change, so its file is written once, as the
+     capture is made. When
    the project's path changes, the bridge loads the sidecar beside the
    new path if there is one. If there is none, it keeps its map for the
    tracks the project still has and writes it there; this covers a first
    save and *Save as*. An unsaved project keeps its captures in memory
    only.
-7. **Size:** a frame is 220 bytes (ADR 0007). Five minutes of
-   40 tracks is about 53 MB. Old captures that are fully replaced are
-   deleted.
+7. **Size and history:** a frame is 220 bytes (ADR 0007). Five minutes
+   of 40 tracks is about 53 MB. A capture whose data newer captures have
+   wholly replaced is *superseded*. The map keeps the 8 most recent
+   superseded captures, so that `compare` can rebuild the map as it was
+   after any of them (ADR 0007 §5). Older ones are deleted.
 
 ## Consequences
 

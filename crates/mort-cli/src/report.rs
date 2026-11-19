@@ -362,3 +362,103 @@ pub fn frames(client: &mut Client, args: &Frames) -> Result<(Vec<String>, Value)
     }
     Ok((lines, r))
 }
+
+/// `mort compare` arguments.
+#[derive(Args)]
+pub struct Compare {
+    /// The range, such as `9.1..17.1`; the later capture's by default.
+    range: Option<String>,
+    /// The capture before; the one before `--b` that covers the range by
+    /// default.
+    #[arg(long)]
+    a: Option<u64>,
+    /// The capture after; the latest that covers the range by default.
+    #[arg(long)]
+    b: Option<u64>,
+    /// Show tracks that moved less than this, in dB, too.
+    #[arg(long, default_value_t = 0.5)]
+    min: f64,
+}
+
+fn finding_line(x: &Value) -> String {
+    format!(
+        "  {:<14} {} ({:.2})",
+        x["kind"].as_str().unwrap_or("?"),
+        x["suggest"].as_str().unwrap_or(""),
+        f(&x["severity"])
+    )
+}
+
+/// Runs `mort compare`.
+pub fn compare(client: &mut Client, args: &Compare) -> Result<(Vec<String>, Value), Failure> {
+    let mut p = with_range(client, args.range.as_deref(), json!({}))?;
+    if let Some(a) = args.a {
+        p["a"] = json!(a);
+    }
+    if let Some(b) = args.b {
+        p["b"] = json!(b);
+    }
+    let r = client.call("map.compare", p)?;
+    let mut lines = vec![format!("capture {} → {} over {}", r["a"], r["b"], span(&r))];
+    for sec in r["sections"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "{} {}",
+            sec["section"].as_str().unwrap_or("?"),
+            span(sec)
+        ));
+        let all = sec["tracks"].as_array().cloned().unwrap_or_default();
+        let moved: Vec<&Value> = all.iter().filter(|t| f(&t["size"]) >= args.min).collect();
+        if moved.is_empty() {
+            lines.push(format!("  nothing moved by {} dB or more", args.min));
+            continue;
+        }
+        let mut rows = vec![vec![
+            "track".to_owned(),
+            "loudness".into(),
+            "bands that moved most".into(),
+        ]];
+        for t in &moved {
+            let bands: Vec<String> = t["bands"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|b| format!("{} {:+.1}", hz(f(&b[0])), f(&b[1])))
+                .collect();
+            rows.push(vec![
+                t["name"].as_str().unwrap_or("?").to_owned(),
+                format!("{:.1} → {:.1}", f(&t["loudness"][0]), f(&t["loudness"][1])),
+                bands.join(", "),
+            ]);
+        }
+        lines.extend(show::table(&rows).into_iter().map(|l| format!("  {l}")));
+        if moved.len() < all.len() {
+            lines.push(format!(
+                "  {} other tracks moved less than {} dB",
+                all.len() - moved.len(),
+                args.min
+            ));
+        }
+    }
+    for (key, title) in [("gone", "findings gone"), ("appeared", "findings new")] {
+        let fs = r[key].as_array().cloned().unwrap_or_default();
+        if !fs.is_empty() {
+            lines.push(format!("{title}:"));
+            lines.extend(fs.iter().map(finding_line));
+        }
+    }
+    let kept = r["kept"].as_array().cloned().unwrap_or_default();
+    if !kept.is_empty() {
+        lines.push("findings still there:".into());
+        for k in &kept {
+            let x = &k["finding"];
+            lines.push(format!(
+                "  {:<14} {} ({:.2} → {:.2})",
+                x["kind"].as_str().unwrap_or("?"),
+                x["suggest"].as_str().unwrap_or(""),
+                f(&k["was"]),
+                f(&x["severity"])
+            ));
+        }
+    }
+    Ok((lines, r))
+}

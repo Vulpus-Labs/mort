@@ -1,7 +1,7 @@
 //! Reading the map by section (ADR 0007 §2, §4): sections from regions,
 //! per-section statistics, and the project facts findings need.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use mort_features::{Frame, OCTAVES, SILENCE_DB, THIRD_OCTAVE_CENTRES_HZ, THIRD_OCTAVES};
 use mort_proto::TrackId;
@@ -88,7 +88,7 @@ pub fn sections(regions: &[Region], range: Span) -> Vec<Section> {
 }
 
 /// What analysis needs to know about a track.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackMeta {
     /// The track.
     pub id: TrackId,

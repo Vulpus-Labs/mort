@@ -71,6 +71,7 @@ fn capture(
             .iter()
             .map(|t| (*t, r.upstream(*t).into_iter().collect()))
             .collect(),
+        tracks: vec![],
     };
     let fs = tracks.iter().map(|t| (*t, frames(span, tag))).collect();
     map.add(c, fs).id
@@ -133,7 +134,8 @@ fn a_capture_clips_and_replaces_older_frames() {
     assert!(k[1].frames.iter().all(|f| f.frame.index == 2));
     assert_eq!(m.segments(BASS).len(), 1, "bass was not re-measured");
 
-    // A capture over everything it covers is dropped.
+    // A capture over everything a and b cover supersedes them; they are
+    // kept for comparing.
     let added = {
         let r = routing();
         let span = Span::new(0.0, 10.0);
@@ -146,6 +148,7 @@ fn a_capture_clips_and_replaces_older_frames() {
                 mode: Mode::Render,
                 tempo: mort_map::tempo_fingerprint(&tempo, 10.0),
                 hashes: hashes(&[]),
+                tracks: vec![],
                 inputs: ALL
                     .iter()
                     .map(|t| (*t, r.upstream(*t).into_iter().collect()))
@@ -154,8 +157,24 @@ fn a_capture_clips_and_replaces_older_frames() {
             ALL.iter().map(|t| (*t, frames(span, 3))).collect(),
         )
     };
-    assert_eq!(added.dropped, [a, b]);
+    assert_eq!(added.superseded, [a, b]);
+    assert!(added.dropped.is_empty());
     assert_eq!(m.captures().count(), 1);
+    assert_eq!(m.all_captures().count(), 3);
+
+    // As it was after b: a's frames, with b's over 4–6 s on the kick.
+    let then = m.as_of(b, Span::new(0.0, 10.0));
+    let k = then.segments(KICK);
+    let spans: Vec<(f64, f64, u64)> = k
+        .iter()
+        .map(|s| (s.span.start, s.span.end, s.capture))
+        .collect();
+    assert_eq!(spans, [(0.0, 4.0, a), (4.0, 6.0, b), (6.0, 10.0, a)]);
+    assert!(k[1].frames.iter().all(|f| f.frame.index == 2));
+    assert_eq!(then.segments(BASS)[0].capture, a);
+    let early = m.as_of(a, Span::new(3.0, 5.0));
+    assert_eq!(early.segments(KICK).len(), 1);
+    assert_eq!(early.segments(KICK)[0].frames.len(), 40);
 }
 
 #[test]
@@ -222,14 +241,31 @@ fn the_sidecar_round_trips() {
     let dir = std::env::temp_dir().join(format!("mort-map-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     store::save(&dir, &mut m, true).unwrap();
-    assert!(m.touched().is_empty());
+    assert!(m.unsaved().is_empty() && !m.changed());
     let back = store::load(&dir).unwrap().unwrap();
     assert_eq!(back, m);
 
-    // Replacing the whole of capture a deletes its file.
+    // Replacing the whole of capture a keeps it, until it falls out of
+    // the history.
     let b = capture(&mut m, &tempo, Span::new(0.0, 4.0), &ALL, 2);
     store::save(&dir, &mut m, false).unwrap();
-    assert!(!dir.join(format!("{a}.frames")).exists());
+    assert!(dir.join(format!("{a}.frames")).exists());
+    assert!(dir.join(format!("{b}.frames")).exists());
+    assert_eq!(store::load(&dir).unwrap().unwrap(), m);
+    for i in 0..mort_map::HISTORY {
+        capture(
+            &mut m,
+            &tempo,
+            Span::new(0.0, 4.0),
+            &ALL,
+            3 + u32::try_from(i).unwrap(),
+        );
+    }
+    store::save(&dir, &mut m, false).unwrap();
+    assert!(
+        !dir.join(format!("{a}.frames")).exists(),
+        "a fell out of the history"
+    );
     assert!(dir.join(format!("{b}.frames")).exists());
     assert_eq!(store::load(&dir).unwrap().unwrap(), m);
     assert!(store::load(&dir.join("none")).unwrap().is_none());

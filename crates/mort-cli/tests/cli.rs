@@ -1153,3 +1153,133 @@ fn summary_findings_report_and_frames() {
         stderr(&o)
     );
 }
+
+/// Two pads stacked in the same range, so they mask each other, over a
+/// bass and keys.
+fn stacked_pads(s: &mut FakeSession) {
+    use mort_session::{NewTrack, Session, Source};
+    for (name, lo, hi, db) in [
+        ("Bass", 40.0, 150.0, -26.0),
+        ("Pad", 150.0, 600.0, -26.0),
+        ("Keys", 600.0, 2500.0, -26.0),
+        ("Pad 2", 150.0, 600.0, -27.0),
+    ] {
+        let t = s
+            .add_track(NewTrack {
+                name: name.into(),
+                ..NewTrack::default()
+            })
+            .unwrap();
+        s.add_sound(t, Source::Pink { lo, hi, db }, None).unwrap();
+    }
+}
+
+fn script(name: &str, text: &str) -> PathBuf {
+    let p = std::env::temp_dir().join(format!("mort-script-{}-{name}.kdl", std::process::id()));
+    std::fs::write(&p, text).unwrap();
+    p
+}
+
+#[test]
+fn a_script_fixes_masking_and_compare_shows_it() {
+    let b = FakeBridge::start_with("script", stacked_pads);
+    ok(&b.mort(&["measure", "1.1..3.1"]));
+    let t = ok(&b.mort(&["findings"]));
+    assert!(t.contains("Pad and Pad 2 compete at"), "{t}");
+
+    let fix = script(
+        "fix",
+        r#"// Cut Pad 2 where it fights Pad, then measure again.
+fx add "Pad 2" ReaEQ
+set "Pad 2" ReaEQ "Freq-Band" "300 Hz"
+set "Pad 2" ReaEQ "Gain-Band" "-24 dB"
+set "Pad 2" ReaEQ "Q-Band" "0.3"
+measure "1.1..3.1"
+compare
+"#,
+    );
+    let t = ok(&b.mort(&["run", fix.to_str().unwrap()]));
+    assert!(
+        t.contains("> fx add \"Pad 2\" ReaEQ\n  held for the batch"),
+        "{t}"
+    );
+    assert!(
+        t.contains("> measure 1.1..3.1\n  measured"),
+        "the batch goes before the job: {t}"
+    );
+    assert!(t.contains("capture 1 → 2"), "{t}");
+    let gone = t.split("findings gone:").nth(1).unwrap_or("");
+    assert!(gone.contains("Pad and Pad 2 compete"), "{t}");
+    assert!(!t.contains("findings new:"), "{t}");
+    let pad2 = t
+        .lines()
+        .find(|l| l.trim_start().starts_with("Pad 2 ") && l.contains('→'))
+        .unwrap();
+    assert!(
+        pad2.contains("315 Hz -"),
+        "the cut shows in Pad 2's bands: {t}"
+    );
+
+    // The four edits were one undo point. (The EQ went in after Pad 2's
+    // probe, so measuring moved the probe back to the end: that is an undo
+    // point of its own, on top.)
+    let fx = ok(&b.mort(&["fx", "pad 2"]));
+    assert!(fx.contains("ReaEQ"), "{fx}");
+    let t = ok(&b.mort(&["undo"]));
+    assert!(t.contains("mort: add probes to measure"), "{t}");
+    let t = ok(&b.mort(&["undo"]));
+    assert!(t.contains("mort: script mort-script"), "{t}");
+    let fx = ok(&b.mort(&["fx", "pad 2"]));
+    assert!(
+        !fx.contains("ReaEQ"),
+        "one undo removes the whole batch: {fx}"
+    );
+}
+
+#[test]
+fn a_failed_step_stops_the_script_and_sends_nothing() {
+    let b = FakeBridge::start_with("script-fail", stacked_pads);
+    let bad = script(
+        "bad",
+        r#"track add Lead
+fx add Lead ReaEQ
+set Lead ReaEQ "Nonsense" "3 dB"
+track add Never
+"#,
+    );
+    let o = b.mort(&["run", bad.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(1));
+    let e = stderr(&o);
+    assert!(
+        e.contains("step 3 (line 3: `set Lead ReaEQ Nonsense \"3 dB\"`)"),
+        "{e}"
+    );
+    assert!(e.contains("no such parameter"), "{e}");
+    let tracks = ok(&b.mort(&["tracks"]));
+    assert!(
+        !tracks.contains("Lead") && !tracks.contains("Never"),
+        "nothing sent: {tracks}"
+    );
+
+    // A usage error is caught before anything runs.
+    let typo = script("typo", "track add Lead\ntrack frobnicate x\n");
+    let o = b.mort(&["run", typo.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("line 2: `track frobnicate x`"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!ok(&b.mort(&["tracks"])).contains("Lead"));
+
+    // `commit` sends what is held: two batches, two undo points.
+    let two = script("two", "track add One\ncommit\ntrack add Two\n");
+    let t = ok(&b.mort(&["run", two.to_str().unwrap(), "--summary", "two steps"]));
+    assert_eq!(t.matches("as one batch").count(), 2, "{t}");
+    ok(&b.mort(&["undo"]));
+    let tracks = ok(&b.mort(&["tracks"]));
+    assert!(
+        tracks.contains("One") && !tracks.contains("Two"),
+        "{tracks}"
+    );
+}

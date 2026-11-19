@@ -191,6 +191,7 @@ fn plan<S: Session>(
 }
 
 struct Before {
+    tracks: Vec<TrackMeta>,
     hashes: BTreeMap<TrackId, u64>,
     routing: Routing,
     tempo: u64,
@@ -275,6 +276,7 @@ impl MeasureJob {
                 .map(|t| (*t, before.routing.upstream(*t).into_iter().collect()))
                 .collect(),
             hashes: before.hashes,
+            tracks: before.tracks,
         };
         let mut st = self.store.borrow_mut();
         let added = st.map.add(capture, measured);
@@ -296,7 +298,8 @@ impl MeasureJob {
             "seconds": self.started.elapsed().as_secs_f64(),
             "measured": list,
             "unmeasured": unmeasured,
-            "dropped": added.dropped,
+            "superseded": added.superseded,
+            "forgotten": added.dropped,
             "saved": st.dir(),
             "save_error": st.save_error,
         }))
@@ -307,6 +310,7 @@ impl<S: Session> Job<S> for MeasureJob {
     fn start(&mut self, s: &mut S) -> Result<(), ErrorObject> {
         let (hashes, routing, _) = project_now(s)?;
         self.before = Some(Before {
+            tracks: track_meta(s)?,
             hashes,
             routing,
             tempo: mort_map::tempo_fingerprint(s.tempo_map(), self.span.end),
@@ -374,6 +378,10 @@ struct RangeQuery {
     kinds: Option<Vec<findings::Kind>>,
     #[serde(default)]
     all: bool,
+    #[serde(default)]
+    a: Option<u64>,
+    #[serde(default)]
+    b: Option<u64>,
 }
 
 /// What analysis needs to know about each track, the master first. A
@@ -447,6 +455,107 @@ fn with_view<S: Session, T>(
     f(&view)
 }
 
+/// The two captures to compare: those given, or the latest capture over
+/// the range and the one before it that also covers it.
+fn pick_pair(map: &MixMap, q: &RangeQuery) -> Result<(u64, u64), ErrorObject> {
+    let range = match (q.start, q.end) {
+        (Some(a), Some(b)) => Some(Span::new(a, b)),
+        _ => None,
+    };
+    let over = |id: u64| {
+        map.capture(id)
+            .is_some_and(|c| range.is_none_or(|r| c.span.intersect(r).is_some()))
+    };
+    let ids: Vec<u64> = map
+        .all_captures()
+        .map(|c| c.id)
+        .filter(|c| over(*c))
+        .collect();
+    let b = match q.b {
+        Some(b) if map.capture(b).is_some() => b,
+        Some(b) => {
+            return Err(invalid(
+                format!("no capture {b}"),
+                "list captures with `mort map`; the last 8 superseded ones are kept",
+            ));
+        }
+        None => *ids.last().ok_or_else(|| {
+            invalid(
+                "no capture covers the range",
+                "measure it: `mort measure <range>`",
+            )
+        })?,
+    };
+    let a = match q.a {
+        Some(a) if map.capture(a).is_some() => a,
+        Some(a) => {
+            return Err(invalid(
+                format!("no capture {a}"),
+                "list captures with `mort map`; the last 8 superseded ones are kept",
+            ));
+        }
+        None => *ids.iter().rev().find(|c| **c < b).ok_or_else(|| {
+            invalid(
+                "only one capture covers the range",
+                "measure again after an edit, then compare",
+            )
+        })?,
+    };
+    Ok((a, b))
+}
+
+/// `map.compare`: the map as of two captures, compared over the range
+/// (the second capture's, by default). Each side is read with the gains
+/// and MIDI its capture recorded.
+fn compare_query<S: Session>(s: &S, st: &Shared, q: &RangeQuery) -> Result<Value, ErrorObject> {
+    let mut store = st.borrow_mut();
+    store.sync(s);
+    let (first, second) = pick_pair(&store.map, q)?;
+    let range = match (q.start, q.end) {
+        (Some(x), Some(y)) => check_range(x, y).map(|()| Span::new(x, y))?,
+        _ => store.map.capture(second).map(|c| c.span).expect("picked"),
+    };
+    let (hashes, routing, _) = project_now(s)?;
+    let now = Now {
+        hashes,
+        routing,
+        tempo: s.tempo_map(),
+    };
+    let live = track_meta(s)?;
+    let secs = sections(&s.regions(), range);
+    let view_of = |map: &'_ MixMap, id: u64| -> Vec<TrackMeta> {
+        map.capture(id)
+            .map(|c| c.tracks.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| live.clone())
+    };
+    let (ma, mb) = (
+        store.map.as_of(first, range),
+        store.map.as_of(second, range),
+    );
+    let va = View {
+        map: &ma,
+        now: &now,
+        master: s.master(),
+        tracks: view_of(&store.map, first),
+        sections: secs.clone(),
+    };
+    let vb = View {
+        map: &mb,
+        now: &now,
+        master: s.master(),
+        tracks: view_of(&store.map, second),
+        sections: secs,
+    };
+    let c = mort_map::compare::compare(&va, &vb, &mort_map::thresholds::Limits::DEFAULT);
+    let mut v = serde_json::to_value(&c).expect("comparisons serialise");
+    v["a"] = json!(first);
+    v["b"] = json!(second);
+    v["start"] = json!(range.start);
+    v["end"] = json!(range.end);
+    Ok(v)
+}
+
 fn the_track<S: Session>(s: &S, q: &RangeQuery) -> Result<TrackId, ErrorObject> {
     let t = q
         .track
@@ -510,6 +619,10 @@ fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared)
             )
         })
     });
+    let st = Rc::clone(store);
+    read(d, "map.compare", move |s: &S, q: RangeQuery| {
+        compare_query(s, &st, &q)
+    });
     read(d, "map.thresholds", |_: &S, _: NoParams| {
         let rows: Vec<Value> = mort_map::thresholds::TABLE
             .iter()
@@ -523,7 +636,7 @@ fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared)
 
 /// Registers `measure` and `map.status` (ticket 0012), and the queries
 /// `map.summary`, `map.track`, `map.frames`, `map.findings` and
-/// `map.thresholds` (ticket 0013).
+/// `map.thresholds` (ticket 0013), and `map.compare` (ticket 0014).
 pub fn register_measure<S: Session + 'static>(d: &mut Dispatcher<S>) {
     let shared: Shared = Rc::new(RefCell::new(Store::new()));
     register_queries(d, &shared);

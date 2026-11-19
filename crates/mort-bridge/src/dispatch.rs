@@ -190,6 +190,42 @@ fn parse<T: for<'de> Deserialize<'de>>(method: &str, params: Value) -> Result<T,
     serde_json::from_value(params).map_err(|e| ErrorObject::invalid_params(method, &e.to_string()))
 }
 
+/// Replaces every string of the form `$N.field.field…` in `params` with
+/// that part of batch call N's result, so a call can use what an earlier
+/// one made (the id of a track or FX it added, say).
+fn resolve_refs(params: &Value, results: &[Value]) -> Result<Value, String> {
+    Ok(match params {
+        Value::String(t) if t.starts_with('$') => {
+            let Some((n, path)) = t[1..].split_once('.') else {
+                return Ok(params.clone());
+            };
+            let Ok(n) = n.parse::<usize>() else {
+                return Ok(params.clone());
+            };
+            let mut v = results
+                .get(n)
+                .ok_or_else(|| format!("`{t}` refers to call {n}, which has not run"))?;
+            for key in path.split('.') {
+                v = v
+                    .get(key)
+                    .ok_or_else(|| format!("`{t}`: call {n}'s result has no `{key}`"))?;
+            }
+            v.clone()
+        }
+        Value::Array(a) => Value::Array(
+            a.iter()
+                .map(|x| resolve_refs(x, results))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, x)| Ok((k.clone(), resolve_refs(x, results)?)))
+                .collect::<Result<_, String>>()?,
+        ),
+        other => other.clone(),
+    })
+}
+
 #[derive(Deserialize)]
 struct EditParams {
     #[serde(default)]
@@ -692,7 +728,13 @@ impl<S: Session> Dispatcher<S> {
         let run_all = |d: &mut Self, s: &mut S| -> Result<Value, ErrorObject> {
             let mut out = Vec::with_capacity(p.calls.len());
             for (i, c) in p.calls.iter().enumerate() {
-                let v = d.run(s, &c.method, c.params.clone()).map_err(|mut e| {
+                let params = resolve_refs(&c.params, &out).map_err(|m| {
+                    invalid(
+                        format!("batch call {i} (`{}`): {m}", c.method),
+                        "refer only to earlier calls' results, as `$<call>.<field>`",
+                    )
+                })?;
+                let v = d.run(s, &c.method, params).map_err(|mut e| {
                     e.message = format!("batch call {i} (`{}`): {}", c.method, e.message);
                     e
                 })?;
@@ -718,5 +760,31 @@ impl<S: Session> Dispatcher<S> {
             }
             r
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_refs;
+    use serde_json::json;
+
+    #[test]
+    fn batch_calls_refer_to_earlier_results() {
+        let results = [json!({ "track": "{T}" }), json!({ "fx": { "id": "{F}" } })];
+        let p = json!({ "fx": "$1.fx.id", "list": ["$0.track", "$x.y", "$5"], "n": 3 });
+        assert_eq!(
+            resolve_refs(&p, &results).unwrap(),
+            json!({ "fx": "{F}", "list": ["{T}", "$x.y", "$5"], "n": 3 })
+        );
+        assert!(
+            resolve_refs(&json!("$2.track"), &results)
+                .unwrap_err()
+                .contains("has not run")
+        );
+        assert!(
+            resolve_refs(&json!("$0.fx"), &results)
+                .unwrap_err()
+                .contains("has no `fx`")
+        );
     }
 }

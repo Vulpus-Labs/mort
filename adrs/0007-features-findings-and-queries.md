@@ -109,6 +109,20 @@ down from a section to a track to a band.
 5. **Compare.** `compare(capture_a, capture_b, range)` gives, per track
    and section, the changes in features and the findings that appeared or
    disappeared. This is how an edit is judged.
+   - Each side is the map as it was just after that capture: every kept
+     capture up to it, laid over the tracks it measured, in order.
+   - Each side is read with the track gains, buses and MIDI its capture
+     recorded, so a fader move or a revoiced part shows as a change.
+   - Two findings are the same problem when they share kind and section,
+     and the same pair of tracks (masking, register clashes) or the same
+     bus or track (the rest).
+   - By default, the range is the later capture's, and the pair is the
+     latest capture over it and the one before.
+   - The RPC is `map.compare`; the CLI is `mort compare [range] [--a]
+     [--b]`. It lists tracks that moved by 0.5 dB or more in loudness or
+     in any third octave, with the bands that moved most. Then it lists
+     findings gone, findings new, and findings kept, with their severity
+     before and after.
 
 ## Consequences
 
