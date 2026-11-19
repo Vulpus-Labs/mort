@@ -1,5 +1,416 @@
 <!DOCTYPE html>
 <html lang="en">
-<head><meta charset="utf-8"><title>mort: the map</title></head>
-<body><p>mort view: the page arrives with ticket 0021.</p></body>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mort: the map</title>
+<style>
+:root {
+  --bg: #fbfbfa; --fg: #1d1d1b; --muted: #6b6b66; --line: #d9d8d3; --panel: #f1f0ec;
+  --cell-empty: #ffffff; --age0: #1f4e9e; --age1: #3d6fbf; --age2: #6e97d6; --age3: #a9c2e8; --age4: #d6e1f2;
+  --hatch: rgba(20, 20, 20, 0.55); --f-low: #e0a100; --f-mid: #d0620a; --f-high: #8e1f7a;
+  --cursor: #111111; --lane: #1f4e9e; --over: #8e1f7a; --region: #ecebe6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #151514; --fg: #ecebe6; --muted: #9a9a93; --line: #34342f; --panel: #1f1f1d;
+    --cell-empty: #1b1b1a; --age0: #8fb4ff; --age1: #6e97e6; --age2: #4f76c0; --age3: #34548e; --age4: #263a5e;
+    --hatch: rgba(255, 255, 255, 0.6); --f-low: #ffc94d; --f-mid: #ff9447; --f-high: #f07ad8;
+    --cursor: #ffffff; --lane: #8fb4ff; --over: #f07ad8; --region: #262624;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 13px/1.35 -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+header { display: flex; gap: 14px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+header button { font: inherit; padding: 2px 8px; }
+#status { color: var(--muted); }
+#banner { display: none; padding: 6px 12px; background: var(--f-mid); color: #000; }
+.legend { display: flex; gap: 8px; align-items: center; color: var(--muted); }
+.sw { display: inline-block; width: 14px; height: 12px; border: 1px solid var(--line); vertical-align: middle; }
+main { display: grid; grid-template-columns: 1fr 320px; height: calc(100vh - 44px); }
+#body { display: grid; grid-template-columns: 180px 1fr; overflow-y: auto; align-items: start; }
+#names { border-right: 1px solid var(--line); }
+#names div { height: var(--row); line-height: var(--row); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 6px; }
+#names .why { color: var(--muted); font-style: italic; }
+#gridwrap { position: relative; overflow-x: auto; overflow-y: hidden; }
+#spacer { position: absolute; top: 0; left: 0; height: 1px; }
+#stage { position: sticky; left: 0; }
+#grid { display: block; }
+#over { position: absolute; left: 0; top: 0; pointer-events: none; }
+#side { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 10px; }
+#side h2 { font-size: 13px; margin: 12px 0 6px; }
+#side table { border-collapse: collapse; width: 100%; }
+#side td { padding: 2px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+#side input { width: 70px; font: inherit; }
+#tip { position: fixed; display: none; pointer-events: none; background: var(--panel); color: var(--fg); border: 1px solid var(--line); padding: 6px 8px; max-width: 360px; box-shadow: 0 2px 8px rgba(0,0,0,.2); z-index: 5; }
+.tabs button.on { font-weight: 600; }
+.err { color: var(--f-high); }
+</style>
+</head>
+<body>
+<header>
+  <h1>mort: the map</h1>
+  <button id="zin" title="Zoom in">+</button><button id="zout" title="Zoom out">−</button>
+  <span class="legend">age:
+    <span class="sw" style="background:var(--age0)"></span>&lt;1 min
+    <span class="sw" style="background:var(--age1)"></span>&lt;10 min
+    <span class="sw" style="background:var(--age2)"></span>&lt;1 h
+    <span class="sw" style="background:var(--age3)"></span>&lt;1 day
+    <span class="sw" style="background:var(--age4)"></span>older
+    <span class="sw" style="background:repeating-linear-gradient(135deg,var(--hatch) 0 2px,transparent 2px 5px)"></span>stale
+    <span>▲ finding (bigger, darker = worse)</span>
+  </span>
+  <span id="status">loading…</span>
+</header>
+<div id="banner"></div>
+<main>
+  <div id="body">
+    <div id="names"></div>
+    <div id="gridwrap"><div id="spacer"></div><div id="stage"><canvas id="grid"></canvas><canvas id="over"></canvas></div></div>
+  </div>
+  <aside id="side">
+    <div class="tabs"><button id="t-cell" class="on">Cell</button> <button id="t-thr">Thresholds</button></div>
+    <div id="cell"><p>Click a cell to see that track in that section, and the evidence for any finding there.</p></div>
+    <div id="thr" style="display:none"></div>
+  </aside>
+</main>
+<div id="tip"></div>
+<script>
+"use strict";
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+const ROW = 18, RULER = 34, LANE = 40, CW = 12;
+const STEPS = [0.05, 0.1, 0.25, 0.5, 1, 2, 5];
+document.documentElement.style.setProperty("--row", ROW + "px");
+const $ = (id) => document.getElementById(id);
+const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let view = null, stepIdx = 3, position = 0, playing = false, version = 0, lastDraw = 0;
+let colors = {};
+
+function readColors() {
+  for (const n of ["bg","fg","muted","line","cell-empty","age0","age1","age2","age3","age4","hatch","f-low","f-mid","f-high","cursor","lane","over","region"])
+    colors[n] = css("--" + n);
+}
+readColors();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); drawAll(); });
+
+async function api(path, opts) {
+  const sep = path.includes("?") ? "&" : "?";
+  const r = await fetch(path + sep + "t=" + TOKEN, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const msg = body.error && (body.error.message || body.error) || r.status;
+    if (body.bridge === false) banner("No bridge: " + msg);
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  return body;
+}
+function banner(text) { const b = $("banner"); b.textContent = text || ""; b.style.display = text ? "block" : "none"; }
+
+// --- Data ----------------------------------------------------------------
+
+async function load(keepScroll) {
+  const step = STEPS[stepIdx];
+  let q = "/api/view?step=" + step;
+  if (view) q += "&start=" + view.start + "&end=" + view.end;
+  let v;
+  try { v = await api(q); } catch (e) {
+    $("status").textContent = String(e.message).includes("empty") ? "the map is empty: measure or play something" : "error: " + e.message;
+    return;
+  }
+  const old = view;
+  view = v; version = Math.max(version, v.version);
+  banner("");
+  const same = old && keepScroll && old.step === v.step && old.start === v.start && old.columns === v.columns
+    && old.rows.length === v.rows.length && old.rows.every((r, i) => r.track === v.rows[i].track && r.unmeasured === v.rows[i].unmeasured);
+  if (same) drawChanged(old);
+  else { layout(); drawAll(); }
+}
+
+function age(t) {
+  const a = view.now - t;
+  return a < 60 ? 0 : a < 600 ? 1 : a < 3600 ? 2 : a < 86400 ? 3 : 4;
+}
+function sevColor(f) { return f >= 0.7 ? colors["f-high"] : f >= 0.4 ? colors["f-mid"] : colors["f-low"]; }
+
+// --- Layout and drawing --------------------------------------------------
+
+function layout() {
+  const names = $("names");
+  names.innerHTML = "";
+  const pad = document.createElement("div");
+  pad.style.height = (RULER + LANE) + "px";
+  pad.innerHTML = "<span class='why'>master lane</span>";
+  names.appendChild(pad);
+  for (const r of view.rows) {
+    const d = document.createElement("div");
+    d.style.paddingLeft = (6 + r.depth * 12) + "px";
+    d.textContent = r.name;
+    if (r.unmeasured) { const w = document.createElement("span"); w.className = "why"; w.textContent = "  " + r.unmeasured; d.appendChild(w); }
+    names.appendChild(d);
+  }
+  $("spacer").style.width = (view.columns * CW) + "px";
+  const wrap = $("gridwrap");
+  const h = RULER + LANE + view.rows.length * ROW;
+  for (const c of [$("grid"), $("over")]) {
+    const w = wrap.clientWidth;
+    c.width = w * devicePixelRatio; c.height = h * devicePixelRatio;
+    c.style.width = w + "px"; c.style.height = h + "px";
+  }
+  $("stage").style.width = wrap.clientWidth + "px";
+  $("gridwrap").style.height = h + "px";
+}
+
+function visible() {
+  const wrap = $("gridwrap");
+  const first = Math.max(0, Math.floor(wrap.scrollLeft / CW));
+  const last = Math.min(view.columns, Math.ceil((wrap.scrollLeft + wrap.clientWidth) / CW) + 1);
+  return [first, last, wrap.scrollLeft];
+}
+
+let hatch = null;
+function hatchPattern(g) {
+  const p = document.createElement("canvas"); p.width = 6; p.height = 6;
+  const c = p.getContext("2d");
+  c.strokeStyle = colors.hatch; c.lineWidth = 1.2;
+  c.beginPath(); c.moveTo(0, 6); c.lineTo(6, 0); c.stroke();
+  return g.createPattern(p, "repeat");
+}
+
+function drawCell(g, r, k, x, y) {
+  const cell = view.rows[r].cells[k];
+  g.fillStyle = colors["cell-empty"];
+  g.fillRect(x, y, CW, ROW);
+  if (!cell) return;
+  g.globalAlpha = 0.35 + 0.65 * Math.min(1, cell.c);
+  g.fillStyle = colors["age" + age(cell.t)];
+  g.fillRect(x, y + 1, CW - 1, ROW - 2);
+  g.globalAlpha = 1;
+  if (cell.x) { g.fillStyle = hatch; g.fillRect(x, y + 1, CW - 1, ROW - 2); }
+  if (cell.f) {
+    const s = 3 + 5 * cell.f;
+    g.fillStyle = sevColor(cell.f);
+    g.beginPath(); g.moveTo(x + CW - 1, y + 1); g.lineTo(x + CW - 1 - s, y + 1); g.lineTo(x + CW - 1, y + 1 + s); g.closePath(); g.fill();
+  }
+}
+
+function drawRuler(g, first, last, sx) {
+  g.fillStyle = colors.bg; g.fillRect(0, 0, g.canvas.width, RULER + LANE);
+  const t0 = view.start, st = view.step;
+  const X = (t) => (t - t0) / st * CW - sx;
+  for (const s of view.sections) {
+    g.fillStyle = colors.region; g.fillRect(X(s.start), 0, X(s.end) - X(s.start) - 1, 15);
+    g.fillStyle = colors.fg; g.font = "11px system-ui"; g.fillText(s.name, Math.max(X(s.start), 0) + 3, 11);
+  }
+  g.fillStyle = colors.muted; g.strokeStyle = colors.line;
+  let lastLabel = -1e9;
+  for (const [bar, t] of view.bars) {
+    const x = X(t);
+    if (x < -40 || x > g.canvas.width) continue;
+    g.beginPath(); g.moveTo(x + .5, 16); g.lineTo(x + .5, RULER); g.stroke();
+    if (x - lastLabel > 28) { g.fillText(String(bar), x + 2, 28); lastLabel = x; }
+  }
+  // Master lane: short-term loudness from -40 to 0 LUFS, overs marked.
+  const top = RULER, y = (l) => top + LANE - 3 - (Math.max(-40, Math.min(0, l)) + 40) / 40 * (LANE - 6);
+  g.strokeStyle = colors.line; g.beginPath(); g.moveTo(0, top + LANE - .5); g.lineTo(g.canvas.width, top + LANE - .5); g.stroke();
+  g.strokeStyle = colors.lane; g.lineWidth = 1.5; g.beginPath();
+  let pen = false;
+  for (let k = first; k < last; k++) {
+    const v = view.lane[k];
+    if (!v || v[0] === null) { pen = false; continue; }
+    const x = k * CW - sx + CW / 2;
+    if (pen) g.lineTo(x, y(v[0])); else { g.moveTo(x, y(v[0])); pen = true; }
+  }
+  g.stroke(); g.lineWidth = 1;
+  g.fillStyle = colors.over;
+  for (let k = first; k < last; k++) {
+    const v = view.lane[k];
+    if (v && v[1] > view.headroom) { const x = k * CW - sx; g.fillText("▲", x + 1, top + 10); }
+  }
+}
+
+function drawAll() {
+  if (!view) return;
+  const t = performance.now();
+  const g = $("grid").getContext("2d");
+  g.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  hatch = hatchPattern(g);
+  const [first, last, sx] = visible();
+  g.fillStyle = colors.bg; g.fillRect(0, 0, g.canvas.width, g.canvas.height);
+  drawRuler(g, first, last, sx);
+  let n = 0;
+  for (let r = 0; r < view.rows.length; r++)
+    for (let k = first; k < last; k++) { drawCell(g, r, k, k * CW - sx, RULER + LANE + r * ROW); n++; }
+  drawCursor();
+  report(performance.now() - t, n);
+}
+
+// Redraws only the cells that differ from `old`, and the master lane.
+function drawChanged(old) {
+  const t = performance.now();
+  const g = $("grid").getContext("2d");
+  g.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  const [first, last, sx] = visible();
+  const byId = new Map(old.rows.map((r) => [r.track, r]));
+  let n = 0;
+  for (let r = 0; r < view.rows.length; r++) {
+    const before = byId.get(view.rows[r].track);
+    for (let k = first; k < last; k++) {
+      const a = before && before.cells[k], b = view.rows[r].cells[k];
+      if (JSON.stringify(a) !== JSON.stringify(b)) { drawCell(g, r, k, k * CW - sx, RULER + LANE + r * ROW); n++; }
+    }
+  }
+  drawRuler(g, first, last, sx);
+  report(performance.now() - t, n);
+}
+
+function report(ms, n) {
+  lastDraw = ms;
+  $("status").textContent = `${view.rows.length} tracks · ${view.columns} columns of ${view.step}s · v${version} · drew ${n} cells in ${ms.toFixed(1)} ms` + (playing ? " · playing" : "");
+}
+
+function drawCursor() {
+  const c = $("over"), g = c.getContext("2d");
+  g.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  g.clearRect(0, 0, c.width, c.height);
+  if (!view) return;
+  const sx = $("gridwrap").scrollLeft;
+  const x = (position - view.start) / view.step * CW - sx;
+  if (x < 0 || x > c.width) return;
+  g.strokeStyle = colors.cursor; g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(x, 0); g.lineTo(x, c.height / devicePixelRatio); g.stroke();
+}
+
+// --- Interaction ---------------------------------------------------------
+
+function at(ev) {
+  const rect = $("grid").getBoundingClientRect();
+  const sx = $("gridwrap").scrollLeft;
+  const x = ev.clientX - rect.left + sx, y = ev.clientY - rect.top;
+  const k = Math.floor(x / CW), r = Math.floor((y - RULER - LANE) / ROW);
+  if (!view || k < 0 || k >= view.columns || r < 0 || r >= view.rows.length) return null;
+  const t0 = view.start + k * view.step;
+  return { r, k, row: view.rows[r], cell: view.rows[r].cells[k], t0, t1: t0 + view.step };
+}
+function findingsAt(p) {
+  return view.findings.filter((f) => f.tracks.includes(p.row.track) && f.start < p.t1 && f.end > p.t0);
+}
+const fmt = (t) => t.toFixed(2) + "s";
+const nameOf = (id) => (view.rows.find((r) => r.track === id) || { name: "?" }).name;
+function ago(t) { const a = view.now - t; return a < 60 ? a + " s ago" : a < 3600 ? Math.round(a / 60) + " min ago" : Math.round(a / 3600) + " h ago"; }
+function staleText(x) { return x.why === "tempo" ? "the tempo map changed" : x.why === "routing" ? nameOf(x.track) + " was routed in or out" : nameOf(x.track) + " changed"; }
+
+$("gridwrap").addEventListener("mousemove", (ev) => {
+  const p = at(ev), tip = $("tip");
+  if (!p) { tip.style.display = "none"; return; }
+  let h = `<b>${p.row.name}</b> ${fmt(p.t0)}–${fmt(p.t1)}<br>`;
+  if (!p.cell) h += p.row.unmeasured ? `not measured: ${p.row.unmeasured}` : "never measured";
+  else {
+    h += `${p.cell.s}, ${ago(p.cell.t)}, ${Math.round(p.cell.c * 100)}% covered`;
+    if (p.cell.x) h += `<br>stale: ${staleText(p.cell.x)}`;
+  }
+  for (const f of findingsAt(p)) h += `<br>▲ ${f.kind} (${f.severity.toFixed(2)}): ${f.tracks.map(nameOf).join(", ")}`;
+  tip.innerHTML = h; tip.style.display = "block";
+  tip.style.left = (ev.clientX + 14) + "px"; tip.style.top = (ev.clientY + 12) + "px";
+});
+$("gridwrap").addEventListener("mouseleave", () => { $("tip").style.display = "none"; });
+$("gridwrap").addEventListener("scroll", () => { requestAnimationFrame(drawAll); });
+window.addEventListener("resize", () => { if (view) { layout(); drawAll(); } });
+
+$("gridwrap").addEventListener("click", async (ev) => {
+  const p = at(ev);
+  if (!p) return;
+  tab("cell");
+  const sec = view.sections.find((s) => s.start <= p.t0 && s.end > p.t0) || { start: p.t0, end: p.t1, name: "" };
+  const box = $("cell");
+  box.innerHTML = `<h2>${p.row.name} in ${sec.name || "this stretch"} (${fmt(sec.start)}–${fmt(sec.end)})</h2><p>loading…</p>`;
+  let html = `<h2>${p.row.name} in ${sec.name || "this stretch"} (${fmt(sec.start)}–${fmt(sec.end)})</h2>`;
+  try {
+    const t = await api(`/api/track?track=${encodeURIComponent(p.row.track)}&start=${sec.start}&end=${sec.end}`);
+    const s = t.sections[0];
+    if (!s) html += "<p>No data here.</p>";
+    else {
+      const st = s.stats;
+      const rows = [["loudness", st.loudness.toFixed(1) + " LUFS"], ["peak", st.true_peak.toFixed(1) + " dBTP"],
+        ["crest", st.crest.toFixed(1) + " dB"], ["centroid", Math.round(st.centroid) + " Hz"], ["tilt", st.tilt.toFixed(1) + " dB/oct"],
+        ["side", st.side.toFixed(0) + " dB"], ["low correlation", st.correlation_low.toFixed(2)], ["onsets", st.density.toFixed(1) + " /s"],
+        ["loudest bands", s.top_bands.map((b) => `${b[0]} Hz ${b[1]} dB`).join(", ")]];
+      if (s.share) rows.push(["share of " + nameOf(s.share.bus), `low ${s.share.low}%, low-mid ${s.share.low_mid}%, mid ${s.share.mid}%, high-mid ${s.share.high_mid}%, high ${s.share.high}%`]);
+      if (s.stale) rows.push(["stale", staleText(s.stale)]);
+      html += "<table>" + rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") + "</table>";
+    }
+  } catch (e) { html += `<p class="err">${e.message}</p>`; }
+  const fs = findingsAt(p);
+  if (fs.length) {
+    html += "<h2>Findings here</h2>";
+    for (const f of fs) {
+      html += `<p><b>${f.kind}</b> ${f.severity.toFixed(2)}${f.stale ? " (stale)" : ""}<br>${f.suggest}</p><table>`;
+      for (const [k, v] of Object.entries(f.evidence)) html += `<tr><td>${k}</td><td>${typeof v === "object" ? JSON.stringify(v) : v}</td></tr>`;
+      html += "</table>";
+      if (f.overridden) html += `<p>overridden thresholds: ${f.overridden.join(", ")}</p>`;
+    }
+  }
+  box.innerHTML = html;
+});
+
+function tab(which) {
+  $("cell").style.display = which === "cell" ? "" : "none";
+  $("thr").style.display = which === "thr" ? "" : "none";
+  $("t-cell").classList.toggle("on", which === "cell");
+  $("t-thr").classList.toggle("on", which === "thr");
+  if (which === "thr") thresholds();
+}
+$("t-cell").onclick = () => tab("cell");
+$("t-thr").onclick = () => tab("thr");
+
+async function thresholds(msg) {
+  const box = $("thr");
+  let r;
+  try { r = await api("/api/thresholds"); } catch (e) { box.innerHTML = `<p class="err">${e.message}</p>`; return; }
+  let h = `<h2>Thresholds</h2><p>${r.file ? "saved in " + r.file : "in memory only: save the project to keep them"}</p>`;
+  if (r.error) h += `<p class="err">${r.error}</p>`;
+  if (msg) h += `<p class="err">${msg}</p>`;
+  h += `<table><tr><td>min_severity</td><td><input data-k="min_severity" value="${r.min_severity}"></td><td></td></tr>`;
+  for (const t of r.thresholds.filter((x) => x.overridable))
+    h += `<tr title="${t.reason.replace(/"/g, "&quot;")}"><td>${t.name}${t.overridden ? " *" : ""}</td><td><input data-k="${t.name}" value="${t.value}"> ${t.unit}</td><td>${t.overridden ? `<button data-reset="${t.name}">reset</button>` : ""}</td></tr>`;
+  box.innerHTML = h + "</table><p>Hover a row for the reason behind its default. Press Enter to apply.</p>";
+  for (const i of box.querySelectorAll("input")) i.onkeydown = async (ev) => {
+    if (ev.key !== "Enter") return;
+    try { await api("/api/thresholds", { method: "POST", body: JSON.stringify({ name: i.dataset.k, value: Number(i.value) }) }); thresholds(); }
+    catch (e) { thresholds(e.message); }
+  };
+  for (const b of box.querySelectorAll("button[data-reset]")) b.onclick = async () => {
+    await api("/api/thresholds", { method: "POST", body: JSON.stringify({ name: b.dataset.reset, reset: true }) }).catch(() => {});
+    thresholds();
+  };
+}
+
+$("zin").onclick = () => { if (stepIdx > 0) { stepIdx--; load(false); } };
+$("zout").onclick = () => { if (stepIdx < STEPS.length - 1) { stepIdx++; load(false); } };
+
+// --- Live ----------------------------------------------------------------
+
+let pending = false;
+function listen() {
+  const es = new EventSource("/events?t=" + TOKEN + "&since=" + version);
+  es.addEventListener("change", (e) => {
+    const d = JSON.parse(e.data);
+    version = Math.max(version, d.version);
+    position = d.position; playing = d.playing;
+    if (!pending) { pending = true; setTimeout(() => { pending = false; load(true); }, 100); }
+  });
+  es.addEventListener("cursor", (e) => {
+    const d = JSON.parse(e.data);
+    position = d.position; playing = d.playing; drawCursor();
+  });
+  es.addEventListener("bridge", (e) => {
+    const d = JSON.parse(e.data);
+    banner(d.up ? "" : "The bridge is not running (" + (d.why || "") + "). Retrying…");
+    if (d.up) load(true);
+  });
+}
+
+load(false).then(listen);
+</script>
+</body>
 </html>

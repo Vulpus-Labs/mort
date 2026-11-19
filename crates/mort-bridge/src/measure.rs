@@ -796,6 +796,9 @@ fn map_view<S: Session>(
         d
     };
     let mut rows = Vec::new();
+    // Staleness is per track and capture, not per cell.
+    let mut stale_of: std::collections::HashMap<(TrackId, u64), Option<mort_map::Stale>> =
+        std::collections::HashMap::new();
     let all = std::iter::once(s.track(master)?).chain(tracks.iter().cloned());
     for t in all {
         let unmeasured = if !t.fx.iter().any(is_probe) {
@@ -834,7 +837,10 @@ fn map_view<S: Session>(
                     "s": c.source,
                     "t": c.taken,
                 });
-                if let Some(why) = v.map.staleness(t.id, c.id, v.now) {
+                let why = *stale_of
+                    .entry((t.id, c.id))
+                    .or_insert_with(|| v.map.staleness(t.id, c.id, v.now));
+                if let Some(why) = why {
                     out["x"] = json!(why);
                 }
                 let here: Vec<&findings::Finding> = fs
@@ -858,12 +864,63 @@ fn map_view<S: Session>(
             "cells": cells,
         }));
     }
+    // Bar starts across the range, for the ruler.
+    let tm = s.tempo_map();
+    let mut bars = Vec::new();
+    let first = tm.bar_at_qn(tm.seconds_to_qn(range.start));
+    for bar in first..first.saturating_add(10_000) {
+        let t = tm.qn_to_seconds(tm.bar_start_qn(bar));
+        if t >= range.end {
+            break;
+        }
+        if t >= range.start - 1e-9 {
+            bars.push(json!([bar, t]));
+        }
+    }
+    // The master lane: each column's highest short-term loudness and true
+    // peak, skipping unknown values.
+    let frames = v.frames(master, range);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "column indices"
+    )]
+    let lane: Vec<Value> = {
+        let mut cols: Vec<(f64, f64)> = vec![(f64::NEG_INFINITY, f64::NEG_INFINITY); n];
+        for (t, f) in &frames {
+            let k = (((t - range.start) / step).floor() as usize).min(n - 1);
+            let st = f64::from(f.short_term_lufs);
+            if st.is_finite() {
+                cols[k].0 = cols[k].0.max(st);
+            }
+            cols[k].1 = cols[k].1.max(f64::from(f.true_peak_dbtp));
+        }
+        cols.into_iter()
+            .map(|(st, tp)| {
+                if tp.is_finite() {
+                    json!([
+                        if st.is_finite() {
+                            json!((st * 10.0).round() / 10.0)
+                        } else {
+                            Value::Null
+                        },
+                        (tp * 10.0).round() / 10.0
+                    ])
+                } else {
+                    Value::Null
+                }
+            })
+            .collect()
+    };
     Ok(json!({
         "version": x.version,
         "start": range.start,
         "end": range.end,
         "step": step,
         "columns": n,
+        "bars": bars,
+        "lane": lane,
+        "headroom": x.overrides.limits().headroom,
         "sections": v.sections,
         "rows": rows,
         "findings": fs,
