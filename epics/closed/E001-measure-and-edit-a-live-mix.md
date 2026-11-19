@@ -57,7 +57,7 @@ Decisions: ADRs 0001–0007, 0009 and 0011. ADR 0008 (plans) and ADR 0010
 0013 (needs 0012 and 0008). Then 0014 (needs 0013 and 0007). Then 0015.
 
 Deferred, outside the epic's proof: 0016 (send-envelope creation) and
-0017 (calibrating findings on Fenland's stems, which the user chose to do
+0023 (calibrating findings on Fenland's stems, which the user chose to do
 after synthetic calibration).
 
 ## Close-out (2026-11-19)
@@ -71,7 +71,7 @@ undo point), and judge the edit with `compare`, all from the shell.
 Deferred:
 
 - 0016: creating send envelopes.
-- 0017: calibrating findings on Fenland's stems. The thresholds were
+- 0023: calibrating findings on Fenland's stems. The thresholds were
   calibrated on synthetic mixes; in the proof they caught the planted
   problems on real instruments.
 - E002: plans and manifests.

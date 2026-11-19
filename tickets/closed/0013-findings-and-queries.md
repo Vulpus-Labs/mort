@@ -1,6 +1,6 @@
 ---
 id: "0013"
-title: "Findings and queries; calibration (synthetic; Fenland in 0017)"
+title: "Findings and queries; calibration (synthetic; Fenland in 0023)"
 priority: high
 created: 2026-11-18
 epic: E001
@@ -25,7 +25,7 @@ thresholds on Fenland, where we know what needed fixing.
       them, and check findings against known problems and fixes. Put the
       thresholds in one table with reasons. Record the results in the
       close-out.~~ Calibrated on synthetic mixes with planted problems
-      instead, at the user's choice; Fenland moves to 0017.
+      instead, at the user's choice; Fenland moves to 0023.
 - [x] Each finding kind has a fake-session test that plants the problem
       and expects the finding, and a clean case that does not produce
       it.
@@ -77,14 +77,14 @@ thresholds on Fenland, where we know what needed fixing.
   - Masking below 708 Hz is generous. The low bands' 683 ms window
     spreads energy across neighbouring bands, so same-level parts whose
     ranges overlap by a few percent can compete in three bands there.
-    This is noted for 0017.
+    This is noted for 0023.
   - The fake's first CLI fixture overlapped every part by two octaves and
     produced 50 masking findings. Each was real, but there were too many
     to read, so `mort findings` now shows the 20 worst and says how many
     it left out.
 - **Deviations:**
   - Calibration was on synthetic material, not Fenland; Fenland is
-    deferred to ticket 0017.
+    deferred to ticket 0023.
   - Track contributions ignore automation and REAPER's pan law (ADR 0007
     §2).
 - **REAPER:** this ticket adds no REAPER calls. The bridge's queries read

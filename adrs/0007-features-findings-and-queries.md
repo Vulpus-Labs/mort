@@ -89,7 +89,7 @@ down from a section to a track to a band.
      two) and the mud and harsh excess at 2 dB. Clean mixes read up to
      1.2 dB; a band at the others' level reads 2.9–3.3 dB.
    - Calibration on Fenland's stems, where we know what was fixed and
-     why, comes later (ticket 0017).
+     why, comes later (ticket 0023).
    - `mort findings --all` reports every measurement as if it were a
      finding, so a caller can see how close each one is to its
      threshold.
