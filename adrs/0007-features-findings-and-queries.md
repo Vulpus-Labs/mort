@@ -88,8 +88,12 @@ down from a section to a track to a band.
    - That set the masking band count at three (clean crossovers reach
      two) and the mud and harsh excess at 2 dB. Clean mixes read up to
      1.2 dB; a band at the others' level reads 2.9–3.3 dB.
-   - Calibration on Fenland's stems, where we know what was fixed and
-     why, comes later (ticket 0023).
+   - Calibration on real material is still to do. Ticket 0023 planned it
+     on Fenland's stems and was dropped on 2026-11-19, because the stems
+     are gone. Until another mix with known problems and fixes is found,
+     the thresholds stay provisional. That includes masking below 708 Hz,
+     where the 683 ms window spreads energy into neighbouring bands, so
+     parts whose ranges barely overlap may compete in three bands there.
    - `mort findings --all` reports every measurement as if it were a
      finding, so a caller can see how close each one is to its
      threshold.

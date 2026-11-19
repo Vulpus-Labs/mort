@@ -2,8 +2,8 @@
 //!
 //! Ticket 0013 calibrated these on synthetic mixes with planted problems
 //! (`cargo test -p mort-bridge --test findings -- --ignored --nocapture`
-//! prints the measurements). They
-//! are provisional until calibrated on real material (Fenland). Each reason
+//! prints the measurements). They are provisional until calibrated on
+//! real material with known problems (ADR 0007 §3). Each reason
 //! gives the measured clean and planted values the threshold sits between.
 
 /// A threshold and why it has its value.
