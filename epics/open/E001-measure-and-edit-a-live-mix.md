@@ -45,7 +45,7 @@ Decisions: ADRs 0001–0007, 0009 and 0011. ADR 0008 (plans) and ADR 0010
 | 0010 | `mort-features`: features, reference tests, filter-bank choice, cost |
 | 0011 | `mort-probe`: CLAP plugin, attach, ring, slot identity, stamping |
 | 0012 | Captures: assembly, staleness, sidecar persistence, `measure --stale` |
-| 0013 | Findings and queries; calibration on Fenland material |
+| 0013 | Findings and queries; calibration on synthetic mixes with planted problems |
 | 0014 | `compare`, and `mort run` scripts |
 | 0015 | End to end in REAPER: the proof above |
 
@@ -55,3 +55,7 @@ Decisions: ADRs 0001–0007, 0009 and 0011. ADR 0008 (plans) and ADR 0010
 0005. Then 0006 and 0009 in parallel (both need 0005). Then 0007 and 0008
 (need 0006), and 0011 (needs 0009 and 0010). Then 0012 (needs 0011). Then
 0013 (needs 0012 and 0008). Then 0014 (needs 0013 and 0007). Then 0015.
+
+Deferred, outside the epic's proof: 0016 (send-envelope creation) and
+0017 (calibrating findings on Fenland's stems, which the user chose to do
+after synthetic calibration).
