@@ -443,7 +443,7 @@ r = call("batch", {"summary": "smoke script", "calls": [
     {"method": "track.add", "params": {"name": "Scripted"}},
     {"method": "fx.add", "params": {"track": "$0.track", "plugin": "ReaEQ"}},
     {"method": "param.set", "params": {"fx": "$1.fx.id", "param": "Gain-Band 2", "text": "-6 dB"}}]})
-res = r.get("result", [])
+res = r.get("result", {}).get("results", [])
 check("batch: later calls use earlier results, parameters by name",
       len(res) == 3 and res[2].get("display", "").startswith("-6"), str(r.get("error") or res[2:]))
 
@@ -461,7 +461,7 @@ check("a failed batch is rolled back, and only it",
 r = call("map.view", {"start": 0.0, "end": 4.0, "step": 0.5}).get("result", {})
 rows = r.get("rows", [])
 check("map.view: master first, every track a row, cells with source and age",
-      rows and rows[0]["master"] and len(rows) == n_tracks + 1
+      rows and rows[0]["master"] and len(rows) == len(call("tracks.list")["result"]["tracks"]) + 1
       and any(c and c.get("s") for row in rows for c in row["cells"]),
       str(r.get("error") or [(x["name"], x["unmeasured"]) for x in rows]))
 v0 = call("map.watch", {"since": 0, "timeout_ms": 0}).get("result", {})

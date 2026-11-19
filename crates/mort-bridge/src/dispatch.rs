@@ -765,11 +765,14 @@ impl<S: Session> Dispatcher<S> {
                 })?;
                 out.push(v);
             }
-            Ok(Value::Array(out))
+            Ok(json!({ "results": out }))
         };
         if edits {
             let label = p.summary.clone().unwrap_or_else(|| "batch".to_owned());
-            self.edit(session, p.expect_state, &label, false, run_all)
+            let mut v = self.edit(session, p.expect_state, &label, false, run_all)?;
+            v["state"] = json!(session.state());
+            v["undo_point"] = json!(self.last_undo_point);
+            Ok(v)
         } else {
             let jobs_before = self.next_job;
             let r = run_all(self, session);

@@ -1,6 +1,6 @@
 # ADR 0012: Auditions and the map view
 
-- **Status:** Accepted (ticket 0017 implements §1–5)
+- **Status:** Accepted
 - **Date:** 2026-11-19
 
 ## Context
@@ -154,6 +154,18 @@ a time.
   it, and JSON shows it as `null`.
 - Format 3 frames files hold several captures; format 2 sidecars still
   load, and their `mode` reads as `source`.
+
+## Answers from ticket 0022 (REAPER 7.67)
+
+- **REAPER resets plugins on a seek, and on every playback start**, going
+  by the probe's count of CLAP `reset` calls. The warm-up rule (§2) stands.
+- **Dragging an FX knob moves the state count during the drag**, about
+  once a second, and again on release. Audio heard mid-drag lands in short
+  stretches under passing states, which are stale at once, so it is never
+  kept as fresh.
+- **Tracks that are not soloed still run their FX.** So a track's own,
+  pre-fader data under solo is fair, as §2 assumes.
+- The proof is in `docs/e003-proof.md`.
 
 ## Consequences
 

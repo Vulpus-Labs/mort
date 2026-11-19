@@ -1,7 +1,7 @@
 ---
 id: E003
 title: "Auditions feed the map; a live view of the whole map"
-status: open
+status: closed
 created: 2026-11-19
 ---
 
@@ -44,3 +44,13 @@ there.
 
 0017 needs 0012 (closed). 0019 needs 0013. 0018 needs 0017 and 0019.
 0020 needs 0018. 0021 needs 0020. 0022 needs 0021.
+
+## Close-out (2026-11-19)
+
+Tickets 0017–0022 are closed, and the proof ran in REAPER
+([docs/e003-proof.md](../../docs/e003-proof.md)). Listening in REAPER
+now keeps the map current. `mort view` shows the whole map in the browser,
+live: how recent each part is, what is stale and why, what was never
+measured, and the findings over the project's thresholds, which the page
+can change. ADR 0012 is Accepted, with REAPER's behaviour on seeks, knob
+drags and solo measured.

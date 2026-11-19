@@ -312,3 +312,20 @@ fn a_format_2_sidecar_still_loads() {
     assert_eq!(m.segments(KICK)[0].frames.len(), 2);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn slivers_between_playbacks_are_dropped() {
+    let tempo = SteppedTempoMap::constant(120.0, 4, 4);
+    let mut m = MixMap::new();
+    capture(&mut m, &tempo, Span::new(0.0, 4.0), &[KICK], 1);
+    // A second playback whose grid sits 3 µs later leaves 0–0.000003 of
+    // the first: no sliver may remain.
+    capture(&mut m, &tempo, Span::new(0.000_003, 2.0), &[KICK], 2);
+    let spans: Vec<(f64, f64)> = m
+        .segments(KICK)
+        .iter()
+        .map(|s| (s.span.start, s.span.end))
+        .collect();
+    assert_eq!(spans.len(), 2, "{spans:?}");
+    assert!(spans[0].1 - spans[0].0 > 1.9);
+}

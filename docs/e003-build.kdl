@@ -1,0 +1,24 @@
+// The E003 proof's session: Bass, a Chords folder holding Pad and Warm,
+// and Keys; two regions; MIDI on every track.
+track add Bass
+track add Chords
+track add Pad in=Chords
+track add Warm in=Chords
+track add Keys
+commit
+fx add Bass vxn-1c
+fx add Pad vxn-2b
+fx add Warm "silkscreen Poly-Kritter"
+fx add Keys ReaSynth
+fx add Warm ReaEQ
+region add verse "1.1..5.1"
+region add chorus "5.1..9.1"
+track set Bass volume=-6
+track set Pad volume=-14
+track set Warm volume=-12
+track set Keys volume=-10
+commit
+midi Bass "1.1..9.1" "E1:1.1:8b" "C2:3.1:8b" "A1:5.1:8b" "B1:7.1:8b"
+midi Pad "1.1..9.1" "E2:1.1:32b" "G2:+0b:32b" "B2:+0b:32b"
+midi Warm "1.1..9.1" "C3:1.1:32b:90" "E3:+0b:32b:90" "G3:+0b:32b:90" "C4:+0b:32b:90"
+midi Keys "1.1..9.1" "C5:1.1:0.5b:80" "E5:+1b:0.5b:80" "G5:+1b:0.5b:80" "B5:+1b:0.5b:80" "C5:+1b:0.5b:80" "E5:+1b:0.5b:80" "G5:+1b:0.5b:80" "B5:+1b:0.5b:80" "C5:+1b:0.5b:80" "E5:+1b:0.5b:80" "G5:+1b:0.5b:80" "B5:+1b:0.5b:80" "C5:+1b:0.5b:80" "E5:+1b:0.5b:80" "G5:+1b:0.5b:80" "B5:+1b:0.5b:80" "C5:+1b:0.5b:80" "E5:+1b:0.5b:80" "G5:+1b:0.5b:80" "B5:+1b:0.5b:80" "C5:+1b:0.5b:80" "E5:+1b:0.5b:80" "G5:+1b:0.5b:80" "B5:+1b:0.5b:80" "C5:+1b:0.5b:80" "E5:+1b:0.5b:80" "G5:+1b:0.5b:80" "B5:+1b:0.5b:80" "C5:+1b:0.5b:80" "E5:+1b:0.5b:80" "G5:+1b:0.5b:80" "B5:+1b:0.5b:80" 

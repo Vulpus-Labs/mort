@@ -250,7 +250,10 @@ pub fn run(client: &mut Client, a: &Automate) -> Result<(Vec<String>, Value), Fa
     let mut lines = vec![format!("{what}: {}", said.join(", "))];
     let (shown, _) = list_points(client, &target, &what)?;
     lines.extend(shown);
-    Ok((lines, json!({ "results": r, "state": after["state"] })))
+    Ok((
+        lines,
+        json!({ "results": r["results"], "state": after["state"] }),
+    ))
 }
 
 fn list_points(

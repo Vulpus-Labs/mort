@@ -239,7 +239,8 @@ fn batches_are_one_undo_point_and_all_or_nothing() {
             { "method": "tracks.count" },
         ]}),
     );
-    assert_eq!(v["result"][2], 2);
+    assert_eq!(v["result"]["results"][2], 2);
+    assert_eq!(v["result"]["undo_point"], true);
     assert_eq!(r.session.undo_label().as_deref(), Some("mort: two tracks"));
     r.session.undo();
     assert_eq!(r.session.tracks().len(), 0, "one undo removes both");

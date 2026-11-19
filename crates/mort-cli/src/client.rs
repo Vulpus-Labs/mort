@@ -260,7 +260,7 @@ impl Client {
                     json!({ "pending": true })
                 })
                 .collect();
-            return Ok(Some(Value::Array(out)));
+            return Ok(Some(json!({ "results": out, "pending": true })));
         }
         if params.get("summary").is_none() {
             return Ok(None);

@@ -44,7 +44,8 @@ example an agent and a person's shell.
    call can use what an earlier call in the batch made, such as `$0.track`
    for a track that call 0 added. `mort run` relies on this (ADR 0009 §4).
    A reference to a call that has not run, or to a field its result lacks,
-   fails the batch.
+   fails the batch. A batch answers `{results, state, undo_point}`, the
+   results in call order (the last two only when it edits).
 
 ## Consequences
 

@@ -173,6 +173,10 @@ pub struct Cover {
     pub span: Span,
 }
 
+/// Covers shorter than this (half a frame) are dropped: they hold no
+/// frame.
+pub const SLIVER: f64 = 0.025;
+
 /// How many superseded captures the map keeps for comparing.
 pub const HISTORY: usize = 8;
 
@@ -440,9 +444,11 @@ impl MixMap {
                 Span::new(c.span.start, c.span.end.min(span.start)),
                 Span::new(c.span.start.max(span.end), c.span.end),
             ] {
-                // Stamps carry rounding: a sliver left between two spans
-                // that meet is not a stretch of its own.
-                if part.end - part.start > STAMP_SLACK {
+                // Two playbacks' frame grids rarely line up: what is left of
+                // an old cover beside a new one can be a few microseconds
+                // long. Shorter than half a frame, it holds no frame and is
+                // not a stretch of its own.
+                if part.end - part.start > SLIVER {
                     next.push(Cover {
                         capture: c.capture,
                         span: part,
@@ -535,7 +541,13 @@ impl MixMap {
                 continue;
             }
             fs.sort_by(|a, b| a.start.total_cmp(&b.start));
-            let start = fs[0].start.max(from);
+            // A track the capture already holds carries on from where it
+            // ended, even if a frame went missing at the join.
+            let start = if own.contains_key(&t) {
+                from
+            } else {
+                fs[0].start.max(from)
+            };
             own.entry(t).or_default().extend(fs);
             touched.push((t, Span::new(start, end)));
         }
