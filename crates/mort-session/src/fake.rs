@@ -153,6 +153,10 @@ impl PluginSpec {
                         steps: Some(2),
                         ..PluginParam::linear("attached", 0.0, 0.0, 1.0, "")
                     },
+                    PluginParam {
+                        steps: Some(1_000_001),
+                        ..PluginParam::linear("resets", 0.0, 0.0, 1_000_000.0, "")
+                    },
                 ],
                 presets: vec![],
             },
@@ -943,7 +947,7 @@ impl Session for FakeSession {
         let mut values: Vec<f64> = spec.params.iter().map(|p| p.default).collect();
         if spec.name == PROBE {
             // An attached probe shows its slot (ADR 0005 §5).
-            values = vec![f64::from(self.next_slot) / 65_535.0, 1.0];
+            values = vec![f64::from(self.next_slot) / 65_535.0, 1.0, 0.0];
             self.next_slot += 1;
         }
         let t = self.get_mut(track)?;

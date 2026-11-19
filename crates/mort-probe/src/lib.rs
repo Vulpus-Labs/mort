@@ -36,6 +36,8 @@ pub const ID: &str = "com.vulpuslabs.mort.probe";
 
 const PARAM_SLOT: u32 = 0;
 const PARAM_ATTACHED: u32 = 1;
+/// How many times the host has reset the plugin (ADR 0012, ticket 0022).
+const PARAM_RESETS: u32 = 2;
 
 /// REAPER's `reaper_plugin_info_t`, which `cockos.reaper_extension` returns.
 #[repr(C)]
@@ -116,6 +118,7 @@ impl DefaultPluginFactory for Probe {
     fn new_shared(host: HostSharedHandle<'_>) -> Result<ProbeShared, PluginError> {
         Ok(ProbeShared {
             slot: attach(&host),
+            resets: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -130,6 +133,8 @@ impl DefaultPluginFactory for Probe {
 /// Shared between threads: the slot, if attached.
 pub struct ProbeShared {
     slot: Option<&'static Slot>,
+    /// Times the host called `reset`, as on a seek it clears tails.
+    resets: std::sync::atomic::AtomicU64,
 }
 
 impl PluginShared<'_> for ProbeShared {}
@@ -224,6 +229,13 @@ impl<'a> PluginAudioProcessor<'a, ProbeShared, ProbeMain<'a>> for ProbeAudio<'a>
         Ok(ProbeAudio { shared, meter })
     }
 
+    fn reset(&mut self) {
+        // Counted, not acted on: the meter restarts itself on any jump in
+        // the timeline. The count shows whether REAPER resets plugins on a
+        // seek (ADR 0012's open question).
+        self.shared.resets.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn deactivate(self, _main: &mut ProbeMain<'a>) {
         if let Some(s) = self.shared.slot {
             s.active.fetch_sub(1, Ordering::Relaxed);
@@ -312,7 +324,7 @@ impl ProbeShared {
 
 impl PluginMainThreadParams for ProbeMain<'_> {
     fn count(&mut self) -> u32 {
-        2
+        3
     }
 
     fn get_info(&mut self, index: u32, info: &mut ParamInfoWriter) {
@@ -338,6 +350,16 @@ impl PluginMainThreadParams for ProbeMain<'_> {
                 max_value: 1.0,
                 default_value: 0.0,
             }),
+            PARAM_RESETS => info.set(&ParamInfo {
+                id: ClapId::new(PARAM_RESETS),
+                flags,
+                cookie: Cookie::default(),
+                name: b"resets",
+                module: b"",
+                min_value: 0.0,
+                max_value: 1_000_000.0,
+                default_value: 0.0,
+            }),
             _ => {}
         }
     }
@@ -346,6 +368,8 @@ impl PluginMainThreadParams for ProbeMain<'_> {
         match id.get() {
             PARAM_SLOT => Some(self.shared.slot_value()),
             PARAM_ATTACHED => Some(self.shared.attached_value()),
+            #[expect(clippy::cast_precision_loss, reason = "a small count")]
+            PARAM_RESETS => Some(self.shared.resets.load(Ordering::Relaxed) as f64),
             _ => None,
         }
     }
@@ -357,7 +381,7 @@ impl PluginMainThreadParams for ProbeMain<'_> {
         writer: &mut ParamDisplayWriter,
     ) -> std::fmt::Result {
         match id.get() {
-            PARAM_SLOT => write!(writer, "{value:.0}"),
+            PARAM_SLOT | PARAM_RESETS => write!(writer, "{value:.0}"),
             PARAM_ATTACHED => write!(writer, "{}", if value >= 0.5 { "yes" } else { "no" }),
             _ => Err(std::fmt::Error),
         }

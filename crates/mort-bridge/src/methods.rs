@@ -758,6 +758,18 @@ struct ProbesPeek {
     limit: Option<usize>,
 }
 
+/// A count a probe shows in a read-only parameter, such as `resets`.
+fn probe_count<S: Session>(s: &S, fx: FxId, name: &str) -> Option<u64> {
+    let p = s.params(fx).ok()?.into_iter().find(|p| p.name == name)?;
+    let v: f64 = p.display.trim().parse().ok()?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "counts are small and positive"
+    )]
+    Some(v.round() as u64)
+}
+
 /// The slot a probe shows in its `slot` parameter, if it has one.
 pub(crate) fn probe_slot<S: Session>(s: &S, fx: mort_proto::FxId) -> Option<u32> {
     let p = s.params(fx).ok()?.into_iter().find(|p| p.name == "slot")?;
@@ -868,6 +880,7 @@ pub fn register_probes<S: Session + 'static>(d: &mut Dispatcher<S>) {
                     "sample_rate": link.and_then(Slot::sample_rate),
                     "pushed": link.map(|l| l.pushed.load(Ordering::Relaxed)),
                     "dropped": link.map(|l| l.dropped.load(Ordering::Relaxed)),
+                    "resets": probe_count(s, f.id, "resets"),
                     "buffered": buffered,
                 }));
             }

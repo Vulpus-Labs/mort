@@ -475,6 +475,42 @@ check("map.watch: a threshold change wakes it",
       any(c["kind"] == "thresholds" for c in v2.get("changes", [])), str(v2))
 call("thresholds.set", {"name": "headroom", "reset": True})
 
+# --- Auditions under solo, and ADR 0012's open questions (ticket 0022) ----
+def probe_by_name():
+    return {p["name"]: p for p in call("probes.list")["result"]["probes"]}
+
+def audition_ids():
+    return {c["id"] for c in call("map.status")["result"]["captures"] if c["source"] == "audition"}
+
+synth_id = next(t["id"] for t in call("tracks.list")["result"]["tracks"] if t["name"] == "Synth")
+before = probe_by_name()
+seen = audition_ids()
+call("track.set", {"track": synth_id, "solo": True, "summary": "smoke solo synth"})
+done = wait_job(call("play", {"start": 0.0, "end": 2.5})["result"]["job"])
+_time.sleep(0.5)
+after = probe_by_name()
+status = call("map.status")["result"]
+new = [c for c in status["captures"] if c["source"] == "audition" and c["id"] not in seen]
+def covered_by(name, ids):
+    row = next((t for t in status["tracks"] if t["name"] == name), {"spans": []})
+    return any(sp["capture"] in ids for sp in row["spans"])
+ids = {c["id"] for c in new}
+check("solo play: the soloed track takes the audition, the master does not",
+      ids and covered_by("Synth", ids) and not covered_by("MASTER", ids),
+      str([(c["id"], c["start"], c["end"], c["tracks"]) for c in new]))
+print("info unsoloed FX: Kick's probe pushed %s frames during the solo play (0 means REAPER skips unsoloed FX)"
+      % (after["Kick"]["pushed"] - before["Kick"]["pushed"]))
+call("track.set", {"track": synth_id, "solo": False, "summary": "smoke unsolo synth"})
+
+# Play jobs queue, so a seek while playing is a hand step (0022); here,
+# whether stopping and starting again resets plugins.
+before = probe_by_name()
+wait_job(call("play", {"start": 0.0, "end": 1.0})["result"]["job"])
+wait_job(call("play", {"start": 10.0, "end": 11.0})["result"]["job"])
+after = probe_by_name()
+print("info stop and start: the Synth probe's resets went from %s to %s"
+      % (before["Synth"]["resets"], after["Synth"]["resets"]))
+
 check("every edit left an undo point", not no_undo_point, ", ".join(no_undo_point) or "all did")
 
 # Save the smoke project's copy so REAPER can quit without asking.
