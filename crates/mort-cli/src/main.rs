@@ -16,6 +16,7 @@ mod script;
 mod show;
 mod smf;
 mod transport;
+mod view;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -145,6 +146,9 @@ enum Command {
     /// Compare the mix before and after an edit: two captures' features by
     /// section and track, and the findings that appeared or went.
     Compare(report::Compare),
+
+    /// Serve the map view on a local web page, until stopped.
+    View(view::View),
 
     /// Run a script of mort commands (a `.kdl` file, or `-` for stdin).
     /// Edits in a row go to REAPER as one batch, with one undo point.
@@ -278,6 +282,10 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
             }])
         }
         Command::Run(r) => script::run(cli, r),
+        Command::View(v) => {
+            view::run(cli.socket.clone(), v)?;
+            Ok(vec![])
+        }
         Command::Install {
             from,
             user_plugins,
@@ -353,7 +361,11 @@ fn step(cmd: &Command, c: &mut Client) -> Result<(Vec<String>, Value), Outcome> 
         Command::Compare(a) => report::compare(c, a)?,
         Command::Undo => edits::undo(c, false)?,
         Command::Redo => edits::undo(c, true)?,
-        Command::Status | Command::Call { .. } | Command::Install { .. } | Command::Run(_) => {
+        Command::Status
+        | Command::Call { .. }
+        | Command::Install { .. }
+        | Command::Run(_)
+        | Command::View(_) => {
             return Err(Outcome::Usage(
                 "status, call, install and run are not script steps".into(),
             ));

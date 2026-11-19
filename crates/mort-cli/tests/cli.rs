@@ -1322,3 +1322,191 @@ fn thresholds_set_and_reset() {
         stderr(&o)
     );
 }
+
+/// An HTTP request to the view server: status line and body.
+fn http(port: u16, method: &str, path: &str, host: &str, body: &str) -> (String, String) {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        s,
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let status = out.lines().next().unwrap_or("").to_owned();
+    let body = out
+        .split_once("\r\n\r\n")
+        .map(|x| x.1.to_owned())
+        .unwrap_or_default();
+    (status, body)
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "one end-to-end story")]
+fn the_view_server_serves_the_map_and_its_changes() {
+    use std::io::{BufRead, BufReader, Write};
+    let b = FakeBridge::start_with("view", band_with_sound);
+    ok(&b.mort(&["measure", "1.1..2.1"]));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mort"))
+        .args([
+            "--socket",
+            b.socket.to_str().unwrap(),
+            "view",
+            "--port",
+            "0",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut url = String::new();
+    out.read_line(&mut url).unwrap();
+    let url = url.trim().to_owned();
+    let rest = url
+        .strip_prefix("http://127.0.0.1:")
+        .expect("a loopback URL");
+    let (port, query) = rest.split_once("/?t=").unwrap();
+    let port: u16 = port.parse().unwrap();
+    let tok = query.to_owned();
+    assert_eq!(tok.len(), 32, "128 bits of token");
+    let host = format!("127.0.0.1:{port}");
+
+    // Refused without the token, with the wrong one, or another Host.
+    assert!(http(port, "GET", "/", &host, "").0.contains("403"));
+    assert!(http(port, "GET", "/?t=nope", &host, "").0.contains("403"));
+    let evil = format!("evil.example:{port}");
+    assert!(
+        http(port, "GET", &format!("/?t={tok}"), &evil, "")
+            .0
+            .contains("403")
+    );
+
+    let (st, page) = http(port, "GET", &format!("/?t={tok}"), &host, "");
+    assert!(st.contains("200") && page.contains("<html"), "{st}");
+    let (st, body) = http(
+        port,
+        "GET",
+        &format!("/api/view?t={tok}&start=0&end=2&step=0.5"),
+        &host,
+        "",
+    );
+    assert!(st.contains("200"), "{st} {body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["columns"], 4);
+    assert!(
+        v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "Kick")
+    );
+
+    let (st, body) = http(
+        port,
+        "POST",
+        &format!("/api/thresholds?t={tok}"),
+        &host,
+        r#"{"name": "headroom", "value": -3}"#,
+    );
+    assert!(st.contains("200"), "{st} {body}");
+    let (st, body) = http(
+        port,
+        "POST",
+        &format!("/api/thresholds?t={tok}"),
+        &host,
+        r#"{"name": "nope", "value": 1}"#,
+    );
+    assert!(
+        st.contains("422") && body.contains("no threshold"),
+        "{st} {body}"
+    );
+
+    // Events: an audition arrives as a change.
+    let version = serde_json::from_str::<Value>(
+        &http(port, "GET", &format!("/api/thresholds?t={tok}"), &host, "").1,
+    )
+    .unwrap()["version"]
+        .as_u64()
+        .unwrap();
+    let mut ev = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        ev,
+        "GET /events?t={tok}&since={version} HTTP/1.1\r\nHost: {host}\r\n\r\n"
+    )
+    .unwrap();
+    ev.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let mut lines = BufReader::new(ev);
+    let mut first = String::new();
+    lines.read_line(&mut first).unwrap();
+    assert!(first.contains("200"), "{first}");
+    ok(&b.mort(&["play", "1.1..2.1"]));
+    let mut got = None;
+    for _ in 0..500 {
+        let mut l = String::new();
+        if lines.read_line(&mut l).unwrap_or(0) == 0 {
+            break;
+        }
+        if l.starts_with("data: ") && l.contains("\"capture\"") {
+            got = Some(l);
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let got = got.expect("a capture event");
+    assert!(got.contains("\"version\""), "{got}");
+}
+
+#[test]
+fn the_view_server_outlives_the_bridge() {
+    use std::io::{BufRead, BufReader, Write};
+    let gone = std::env::temp_dir().join(format!("mort-no-bridge-{}.sock", std::process::id()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mort"))
+        .args(["--socket", gone.to_str().unwrap(), "view", "--port", "0"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut url = String::new();
+    out.read_line(&mut url).unwrap();
+    let rest = url
+        .trim()
+        .strip_prefix("http://127.0.0.1:")
+        .unwrap()
+        .to_owned();
+    let (port, tok) = rest.split_once("/?t=").unwrap();
+    let port: u16 = port.parse().unwrap();
+    let host = format!("127.0.0.1:{port}");
+    let (st, body) = http(port, "GET", &format!("/api/view?t={tok}"), &host, "");
+    assert!(
+        st.contains("503") && body.contains("\"bridge\":false"),
+        "{st} {body}"
+    );
+    let mut ev = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(ev, "GET /events?t={tok} HTTP/1.1\r\nHost: {host}\r\n\r\n").unwrap();
+    ev.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut lines = BufReader::new(ev);
+    let mut seen = String::new();
+    for _ in 0..10 {
+        let mut l = String::new();
+        lines.read_line(&mut l).unwrap();
+        seen.push_str(&l);
+        if l.contains("\"up\":false") {
+            break;
+        }
+    }
+    assert!(
+        seen.contains("event: bridge") && seen.contains("\"up\":false"),
+        "{seen}"
+    );
+    // Still serving.
+    assert!(
+        http(port, "GET", &format!("/?t={tok}"), &host, "")
+            .0
+            .contains("200")
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}

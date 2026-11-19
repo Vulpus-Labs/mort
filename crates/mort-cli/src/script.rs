@@ -114,7 +114,11 @@ fn parse(src: &str) -> Result<Vec<Step>, Outcome> {
             })?;
         if matches!(
             cli.command,
-            Command::Status | Command::Call { .. } | Command::Install { .. } | Command::Run(_)
+            Command::Status
+                | Command::Call { .. }
+                | Command::Install { .. }
+                | Command::Run(_)
+                | Command::View(_)
         ) {
             return Err(Outcome::Usage(format!(
                 "line {line}: `{text}`: status, call, install and run cannot be script steps"
