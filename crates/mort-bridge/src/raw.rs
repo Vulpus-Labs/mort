@@ -290,6 +290,23 @@ pub fn marker(r: &Reaper, idx: c_int) -> Option<(bool, c_int, String, f64, f64)>
     }
 }
 
+/// Adds a region (with `end`) or a marker; returns its number.
+pub fn add_marker(r: &Reaper, name: &str, start: f64, end: Option<f64>) -> c_int {
+    let name = CString::new(name.replace('\0', "")).unwrap_or_default();
+    // SAFETY: main thread, current project; the name lives through the call.
+    unsafe {
+        r.AddProjectMarker2(
+            null_mut(),
+            end.is_some(),
+            start,
+            end.unwrap_or(start),
+            name.as_ptr(),
+            -1,
+            0,
+        )
+    }
+}
+
 /// The current project's file, if it has been saved.
 pub fn project_path(r: &Reaper) -> Option<String> {
     // SAFETY: main thread; -1 means the current project.

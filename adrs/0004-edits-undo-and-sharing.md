@@ -38,10 +38,16 @@ act on a picture of the project the person has since changed.
    `Main_SaveProjectEx` does. `project.get` reports `dirty`. Renders for
    measurement go to a scratch directory (ADR 0006).
 7. **Rollback goes through the failed edit's own undo point.** REAPER
-   moves the state count when an undo block opens or closes, even if
-   nothing changed. So a failed edit is rolled back only if the state
-   moved inside its block and the top undo point carries its label. It can
-   never undo the edit before it.
+   7.67 moves the state count by one when an undo block closes, even an
+   empty one, and not when it opens or inside it (measured in ticket
+   0015). So the count cannot say whether an edit changed anything, and
+   whether it made an undo point is judged by the top undo label becoming
+   its own. An edit whose label equals the one on top is numbered (`mort:
+   add bass (2)`) so the two can be told apart. A failed edit is rolled
+   back only if it made its own undo point, so it can never undo the edit
+   before it. (Until 0015 this judged by the count inside the block, which
+   REAPER never moves, so failed edits were not rolled back in REAPER; the
+   fake had modelled REAPER wrongly.)
 8. **Edits say whether they left an undo point.** REAPER records only the
    changes it is told about. MIDI calls, for example, need the item marked
    dirty. An edit that REAPER failed to record would make the next `undo`

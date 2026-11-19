@@ -674,14 +674,26 @@ impl<S: Session> Dispatcher<S> {
             ));
         }
         let jobs_before = self.next_job;
-        let label = format!("mort: {label}");
+        // Whether the edit made an undo point is judged by the top undo
+        // label becoming its own. REAPER moves the state count when any
+        // block closes, even an empty one, and not before, so the count
+        // cannot tell. A label equal to the one on top gets a number, so
+        // that the two can be told apart.
+        let top = session.undo_label();
+        let mut label = format!("mort: {label}");
+        if top.as_deref() == Some(label.as_str()) {
+            let base = label.clone();
+            let mut n = 2;
+            label = format!("{base} ({n})");
+            while top.as_deref() == Some(label.as_str()) {
+                n += 1;
+                label = format!("{base} ({n})");
+            }
+        }
         session.begin_undo();
-        // REAPER moves the state count when a block opens or closes, even
-        // with nothing in it, so change is judged inside the block only.
-        let opened = session.state();
         let result = body(self, session);
-        let changed = session.state() != opened;
         session.end_undo(&label);
+        let made_point = session.undo_label().as_deref() == Some(label.as_str());
         let result = if may_queue || self.next_job == jobs_before {
             result
         } else {
@@ -697,11 +709,10 @@ impl<S: Session> Dispatcher<S> {
         };
         // Roll back a failed edit, but only through its own undo point:
         // never undo whatever came before it.
-        if result.is_err() && changed && session.undo_label().as_deref() == Some(label.as_str()) {
+        if result.is_err() && made_point {
             session.undo();
         }
-        self.last_undo_point =
-            result.is_ok() && session.undo_label().as_deref() == Some(label.as_str());
+        self.last_undo_point = result.is_ok() && made_point;
         self.mort_state = Some(session.state());
         result
     }

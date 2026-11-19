@@ -405,6 +405,29 @@ fn a_failed_edit_never_undoes_the_one_before() {
         "the first mute was rolled back"
     );
     assert_eq!(r.session.undo_label().as_deref(), Some("mort: add bass"));
+
+    // Two edits in a row with the same summary get told apart, so a
+    // failing second one rolls back only itself.
+    r.call(
+        &mut c,
+        "track.add",
+        json!({ "name": "twin", "summary": "add bass" }),
+    );
+    assert_eq!(
+        r.session.undo_label().as_deref(),
+        Some("mort: add bass (2)")
+    );
+    let v = r.call(
+        &mut c,
+        "batch",
+        json!({ "summary": "add bass (2)", "calls": [
+            { "method": "track.add", "params": { "name": "third" } },
+            { "method": "track.mute", "params": { "track": ghost } },
+        ]}),
+    );
+    assert_eq!(error_kind(&v), "not_found");
+    let names: Vec<String> = r.session.tracks().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, ["bass", "twin"], "only the failed batch was undone");
 }
 
 #[test]

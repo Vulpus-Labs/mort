@@ -734,6 +734,18 @@ impl Session for Live {
             .collect()
     }
 
+    fn add_region(&mut self, name: &str, start: f64, end: Option<f64>) -> Result<u32> {
+        if end.is_some_and(|e| e <= start) {
+            return Err(mort_session::invalid(
+                format!("region {start}..{} is empty", end.unwrap_or(start)),
+                Some(name.to_owned()),
+                "give an end after the start",
+            ));
+        }
+        let n = raw::add_marker(self.low(), name, start, end);
+        u32::try_from(n).map_err(|_| reaper_failed("AddProjectMarker2", &name))
+    }
+
     fn master(&self) -> TrackId {
         TrackId(raw::track_guid(self.low(), raw::master(self.low())))
     }

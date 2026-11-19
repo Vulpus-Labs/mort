@@ -144,6 +144,14 @@ fn edit<S, P: DeserializeOwned>(
 }
 
 #[derive(Deserialize)]
+struct RegionAdd {
+    name: String,
+    start: f64,
+    #[serde(default)]
+    end: Option<f64>,
+}
+
+#[derive(Deserialize)]
 struct TrackAdd {
     name: String,
     #[serde(default)]
@@ -300,6 +308,10 @@ fn param_index<S: Session>(
 pub fn register_edits<S: Session + 'static>(d: &mut Dispatcher<S>) {
     use mort_session::{NewTrack, SendChange, TrackChange};
 
+    edit(d, "region.add", |s: &mut S, p: RegionAdd| {
+        let number = s.add_region(&p.name, p.start, p.end)?;
+        Ok(json!({ "number": number }))
+    });
     edit(d, "track.add", |s: &mut S, p: TrackAdd| {
         let id = s.add_track(NewTrack {
             name: p.name,

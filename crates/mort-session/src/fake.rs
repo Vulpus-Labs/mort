@@ -651,6 +651,13 @@ impl Session for FakeSession {
         self.project.regions.clone()
     }
 
+    fn add_region(&mut self, name: &str, start: f64, end: Option<f64>) -> Result<u32> {
+        if let Some(e) = end {
+            check_range(start, e)?;
+        }
+        Ok(FakeSession::add_region(self, name, start, end))
+    }
+
     fn master(&self) -> TrackId {
         self.project.master.id
     }
@@ -1185,9 +1192,6 @@ impl Session for FakeSession {
     }
 
     fn begin_undo(&mut self) {
-        // REAPER moves the state count when a block opens, even if nothing
-        // then changes; the fake does the same so callers cannot rely on it.
-        self.changed();
         self.open_block = Some((self.project.clone(), self.state));
     }
 
@@ -1198,6 +1202,10 @@ impl Session for FakeSession {
             self.undo_stack.push((label.to_owned(), before));
             self.redo_stack.clear();
         }
+        // REAPER moves the state count when a block closes, even an empty
+        // one (measured in 7.67); the fake does the same, so callers
+        // cannot use the count to tell whether anything changed.
+        self.changed();
     }
 
     fn undo_label(&self) -> Option<String> {

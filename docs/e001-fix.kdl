@@ -1,0 +1,12 @@
+// The E001 proof's fix: clear Pad from Bass's range, and take the mud out
+// of Warm. The six edits go to REAPER as one batch, with one undo point.
+fx add Pad ReaEQ
+set Pad ReaEQ "Freq-Low Shelf" "200"
+set Pad ReaEQ "Gain-Low Shelf" "-24"
+fx add Warm ReaEQ
+set Warm ReaEQ "Freq-Band 2" "300"
+set Warm ReaEQ "Gain-Band 2" "-9"
+set Warm ReaEQ "BW-Band 2" "2.5"
+measure "1.1..9.1"
+findings
+compare

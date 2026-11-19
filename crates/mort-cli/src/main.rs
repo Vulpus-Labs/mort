@@ -66,6 +66,10 @@ enum Command {
     #[command(subcommand)]
     Send(edits::SendCmd),
 
+    /// Add a region or marker.
+    #[command(subcommand)]
+    Region(edits::RegionCmd),
+
     /// List the FX on a track (`mort fx <track>`), or change them.
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Fx {
@@ -299,6 +303,7 @@ fn step(cmd: &Command, c: &mut Client) -> Result<(Vec<String>, Value), Outcome> 
         }
         Command::Track(cmd) => edits::track(c, cmd)?,
         Command::Send(cmd) => edits::send(c, cmd)?,
+        Command::Region(cmd) => edits::region(c, cmd)?,
         Command::Fx {
             action: Some(cmd), ..
         } => edits::fx(c, cmd)?,

@@ -1283,3 +1283,19 @@ track add Never
         "{tracks}"
     );
 }
+
+#[test]
+fn regions_and_markers() {
+    let b = FakeBridge::start_with("regions", |_| {});
+    let t = ok(&b.mort(&["region", "add", "verse", "1.1..5.1"]));
+    assert!(t.starts_with("added region 1 `verse` at 0.00–8.00s"), "{t}");
+    let t = ok(&b.mort(&["region", "add", "drop", "3.1"]));
+    assert!(t.starts_with("added marker 2 `drop` at 4.00s"), "{t}");
+    let o = b.mort(&["call", "project.get"]);
+    let v: Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert_eq!(v["regions"][0]["name"], "verse");
+    assert_eq!(v["regions"][0]["end"], 8.0);
+    assert!(v["regions"][1]["end"].is_null());
+    let t = ok(&b.mort(&["undo"]));
+    assert!(t.contains("mort: add marker drop"), "{t}");
+}

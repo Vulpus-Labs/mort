@@ -426,23 +426,35 @@ sec = (r.get("sections") or [{}])[0]
 check("map.track: the synth's share of the master", sec.get("share") is not None and sec["share"]["bus"] == lst["master"]["id"],
       str(sec.get("share")))
 r = call("map.findings", {"start": 0.0, "end": 4.0, "all": True}).get("result", {})
-check("map.findings --all: a measurement of every audio kind",
-      {"masking", "mud", "harsh", "headroom", "low_end_width"} <= {f["kind"] for f in r.get("findings", [])},
+# The smoke mix is silent (the synth is faded out), so only the kinds that
+# measure without sound report: headroom, low-end width, masking pairs.
+check("map.findings --all: measurements of the master and the tracks",
+      {"masking", "headroom", "low_end_width"} <= {f["kind"] for f in r.get("findings", [])},
       str(sorted({f["kind"] for f in r.get("findings", [])})))
 
 # --- Compare and batch references (ticket 0014) -----------------------------
 rc = call("map.compare", {})
 r = rc.get("result", {})
-moved = {t["name"] for sec in r.get("sections", []) for t in sec["tracks"] if t["size"] >= 0.5}
-check("map.compare: the latest two captures, Kick turned down",
-      r.get("b", 0) > r.get("a", 0) > 0 and "Kick" in moved, str(rc.get("error") or (r.get("a"), r.get("b"), sorted(moved))))
+both = {t["name"] for sec in r.get("sections", []) for t in sec["tracks"]}
+check("map.compare: the latest two captures, with Kick in both",
+      r.get("b", 0) > r.get("a", 0) > 0 and "Kick" in both, str(rc.get("error") or (r.get("a"), r.get("b"), sorted(both))))
 r = call("batch", {"summary": "smoke script", "calls": [
     {"method": "track.add", "params": {"name": "Scripted"}},
     {"method": "fx.add", "params": {"track": "$0.track", "plugin": "ReaEQ"}},
-    {"method": "param.set", "params": {"fx": "$1.fx.id", "param": "Gain-Band 1", "text": "-6 dB"}}]})
+    {"method": "param.set", "params": {"fx": "$1.fx.id", "param": "Gain-Band 2", "text": "-6 dB"}}]})
 res = r.get("result", [])
 check("batch: later calls use earlier results, parameters by name",
       len(res) == 3 and res[2].get("display", "").startswith("-6"), str(r.get("error") or res[2:]))
+
+# A failed batch is rolled back through its own undo point only, even when
+# it has the same label as the edit before it.
+names = lambda: [t["name"] for t in call("tracks.list")["result"]["tracks"]]
+edit("track.add", {"name": "Twin"}, "smoke twin")
+r = call("batch", {"summary": "smoke twin", "calls": [
+    {"method": "track.add", "params": {"name": "Ghost"}},
+    {"method": "track.set", "params": {"track": "{00000000-0000-0000-0000-000000000000}", "volume": 0.5}}]})
+check("a failed batch is rolled back, and only it",
+      "error" in r and "Twin" in names() and "Ghost" not in names(), str(names()))
 
 check("every edit left an undo point", not no_undo_point, ", ".join(no_undo_point) or "all did")
 

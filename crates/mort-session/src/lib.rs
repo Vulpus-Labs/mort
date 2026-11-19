@@ -81,6 +81,14 @@ pub trait Session {
     /// Regions and markers, in time order.
     fn regions(&self) -> Vec<Region>;
 
+    /// Adds a region from `start` to `end`, or a marker at `start` when
+    /// `end` is `None`, and returns its number.
+    ///
+    /// # Errors
+    ///
+    /// `invalid` if `end` is not after `start`.
+    fn add_region(&mut self, name: &str, start: f64, end: Option<f64>) -> Result<u32>;
+
     // --- Tracks ----------------------------------------------------------
 
     /// The master track.

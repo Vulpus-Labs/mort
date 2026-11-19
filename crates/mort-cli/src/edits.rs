@@ -51,6 +51,45 @@ pub enum TrackCmd {
     },
 }
 
+/// `mort region …`
+#[derive(Subcommand)]
+pub enum RegionCmd {
+    /// Add a region over a range (`9.1..17.1`), or a marker at a position.
+    Add {
+        /// Its name.
+        name: String,
+        /// Where: a range for a region, a position for a marker.
+        at: String,
+    },
+}
+
+/// Runs `mort region …`.
+pub fn region(client: &mut Client, cmd: &RegionCmd) -> Result<(Vec<String>, Value), Failure> {
+    let RegionCmd::Add { name: n, at } = cmd;
+    let state = client.call("bridge.status", Value::Null)?["state"].clone();
+    let t = client.call("time.convert", json!({ "to_seconds": [at] }))?;
+    let secs = &t["seconds"][0];
+    let (start, end, what) = match (secs[0].as_f64(), secs[1].as_f64(), secs.as_f64()) {
+        (Some(a), Some(b), _) => (a, Some(b), "region"),
+        (_, _, Some(a)) => (a, None, "marker"),
+        _ => {
+            return Err(usage(format!(
+                "`{at}` is not a position or a range; write `9.1`, or `9.1..17.1` for a region"
+            )));
+        }
+    };
+    let mut p = json!({ "name": n, "start": start });
+    if let Some(e) = end {
+        p["end"] = json!(e);
+    }
+    let r = send_edit(client, "region.add", p, &format!("add {what} {n}"), &state)?;
+    let place = end.map_or_else(|| format!("{start:.2}s"), |e| format!("{start:.2}–{e:.2}s"));
+    Ok((
+        vec![format!("added {what} {} `{n}` at {place}", r["number"])],
+        r,
+    ))
+}
+
 /// `mort send …`
 #[derive(Subcommand)]
 pub enum SendCmd {

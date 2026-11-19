@@ -1,7 +1,7 @@
 ---
 id: E001
 title: "Measure and edit a live mix from the command line"
-status: open
+status: closed
 created: 2026-11-18
 ---
 
@@ -59,3 +59,19 @@ Decisions: ADRs 0001–0007, 0009 and 0011. ADR 0008 (plans) and ADR 0010
 Deferred, outside the epic's proof: 0016 (send-envelope creation) and
 0017 (calibrating findings on Fenland's stems, which the user chose to do
 after synthetic calibration).
+
+## Close-out (2026-11-19)
+
+Tickets 0001–0015 are closed, and the proof ran in REAPER 7.67 as the goal
+describes ([docs/e001-proof.md](../../docs/e001-proof.md)). An agent can
+now build a session, write MIDI and automation, measure it into a map that
+knows what is stale, read findings, edit (by command or by script, as one
+undo point), and judge the edit with `compare`, all from the shell.
+
+Deferred:
+
+- 0016: creating send envelopes.
+- 0017: calibrating findings on Fenland's stems. The thresholds were
+  calibrated on synthetic mixes; in the proof they caught the planted
+  problems on real instruments.
+- E002: plans and manifests.
