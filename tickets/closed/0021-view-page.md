@@ -13,20 +13,20 @@ Draw the whole map in the browser (ADR 0012 §10).
 
 ## Acceptance criteria
 
-- [ ] Grid of tracks (nested by folder) by time, with regions and bars
+- [x] Grid of tracks (nested by folder) by time, with regions and bars
       across the top. It zooms and scrolls in time.
-- [ ] Cells shaded by data age, with a legend. Stale cells hatched with
+- [x] Cells shaded by data age, with a legend. Stale cells hatched with
       their reason on hover. Never-measured cells empty, and unmeasured
       cells marked with their reason.
-- [ ] Findings markers coloured by severity. Hovering shows kind and
+- [x] Findings markers coloured by severity. Hovering shows kind and
       tracks.
-- [ ] Master lane: short-term loudness and true-peak overs.
-- [ ] Play cursor follows the transport. Cells update as events arrive,
+- [x] Master lane: short-term loudness and true-peak overs.
+- [x] Play cursor follows the transport. Cells update as events arrive,
       without redrawing the whole grid.
-- [ ] Clicking a cell shows the `track` query for that section and the
+- [x] Clicking a cell shows the `track` query for that section and the
       evidence of its findings. The thresholds panel edits overrides.
-- [ ] Readable in light and dark. Colours do not rely on red/green alone.
-- [ ] Checked by hand with a 40-track, 5-minute fake session for speed:
+- [x] Readable in light and dark. Colours do not rely on red/green alone.
+- [x] Checked by hand with a 40-track, 5-minute fake session for speed:
       an update draws in under 16 ms.
 
 ## Progress (2026-11-19), not yet closed
@@ -75,3 +75,19 @@ Still to check by hand, with the person, in 0022:
 - Draw time under 16 ms for an update on the 40-track, 5-minute
   session. The status line shows it. Headless Chrome would not start in
   the agent's sandbox, so it is not measured yet.
+
+## Close-out (2026-11-19)
+
+- **Checked by hand in REAPER** during ticket 0022.
+  - The first version did not grow: the page kept fetching the range of
+    its first view, so the grid stayed short while the cursor ran on.
+    Fixed by always fetching everything measured. The person then
+    confirmed the grid and cursor line up and fill in live.
+  - The person found it readable in light and dark mode.
+- **Speed:**
+  - The proof session redrew 45 changed cells in 0.6 ms after a refresh.
+  - The fake 46-track, 5-minute session at 600 columns redrew 527 cells
+    in 2.3 ms, under the 16 ms asked for.
+  - `map.view` on that session takes 0.10 s and returns about 2 MB.
+- **No screenshots** were taken, so the proof document records what the
+  person reported instead.

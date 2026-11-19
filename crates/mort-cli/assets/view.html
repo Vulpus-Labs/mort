@@ -110,9 +110,9 @@ function banner(text) { const b = $("banner"); b.textContent = text || ""; b.sty
 // --- Data ----------------------------------------------------------------
 
 async function load(keepScroll) {
+  // Always everything measured: the map grows while the person listens.
   const step = STEPS[stepIdx];
-  let q = "/api/view?step=" + step;
-  if (view) q += "&start=" + view.start + "&end=" + view.end;
+  const q = "/api/view?step=" + step;
   let v;
   try { v = await api(q); } catch (e) {
     $("status").textContent = String(e.message).includes("empty") ? "the map is empty: measure or play something" : "error: " + e.message;
