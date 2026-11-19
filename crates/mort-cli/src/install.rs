@@ -41,6 +41,43 @@ impl Places {
 const BRIDGE_BUILT: &str = "libmort_bridge.dylib";
 const BRIDGE_INSTALLED: &str = "reaper_mort.dylib";
 const PROBE_BUILT: &str = "mort-probe.clap";
+const PROBE_DYLIB: &str = "libmort_probe.dylib";
+const PROBE_EXE: &str = "mort-probe";
+
+/// The bundle's `Info.plist`, as macOS hosts expect for a CLAP.
+fn info_plist() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>English</string>
+  <key>CFBundleExecutable</key><string>{PROBE_EXE}</string>
+  <key>CFBundleIdentifier</key><string>com.vulpuslabs.mort.probe</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>mort probe</string>
+  <key>CFBundlePackageType</key><string>BNDL</string>
+  <key>CFBundleShortVersionString</key><string>{v}</string>
+  <key>CFBundleVersion</key><string>{v}</string>
+  <key>CFBundleSignature</key><string>????</string>
+</dict>
+</plist>
+"#,
+        v = env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Wraps the probe's dylib as a `.clap` bundle in a temporary directory.
+fn bundle_probe(dylib: &Path, scratch: &Path) -> std::io::Result<PathBuf> {
+    let bundle = scratch.join(PROBE_BUILT);
+    let _ = fs::remove_dir_all(&bundle);
+    let macos = bundle.join("Contents/MacOS");
+    fs::create_dir_all(&macos)?;
+    fs::copy(dylib, macos.join(PROBE_EXE))?;
+    fs::write(bundle.join("Contents/Info.plist"), info_plist())?;
+    fs::write(bundle.join("Contents/PkgInfo"), "BNDL????")?;
+    Ok(bundle)
+}
 
 /// Copies a file or bundle into `dir` under `name`, atomically.
 fn install(src: &Path, dir: &Path, name: &str) -> Result<PathBuf, Failure> {
@@ -105,13 +142,21 @@ pub fn run(places: &Places, reaper_running: bool) -> Result<Vec<String>, Failure
     let dest = install(&bridge, &places.user_plugins, BRIDGE_INSTALLED)?;
     out.push(format!("bridge  {}", dest.display()));
     let probe = places.from.join(PROBE_BUILT);
+    let dylib = places.from.join(PROBE_DYLIB);
     if probe.exists() {
         let dest = install(&probe, &places.clap, PROBE_BUILT)?;
         out.push(format!("probe   {}", dest.display()));
+    } else if dylib.is_file() {
+        let scratch = std::env::temp_dir().join(format!("mort-install-{}", std::process::id()));
+        let bundle = bundle_probe(&dylib, &scratch)
+            .map_err(|e| Failure::Local(format!("cannot bundle {}: {e}", dylib.display())))?;
+        let dest = install(&bundle, &places.clap, PROBE_BUILT)?;
+        let _ = fs::remove_dir_all(&scratch);
+        out.push(format!("probe   {}", dest.display()));
     } else {
         out.push(format!(
-            "probe   not built ({} is missing); skipped",
-            probe.display()
+            "probe   not built ({} is missing; `cargo build -p mort-probe`); skipped",
+            dylib.display()
         ));
     }
     if reaper_running {

@@ -59,6 +59,7 @@ impl FakeBridge {
                 mort_bridge::methods::register_automation(&mut d);
                 mort_bridge::methods::register_midi(&mut d);
                 mort_bridge::methods::register_transport(&mut d);
+                mort_bridge::methods::register_probes(&mut d);
                 let mut session = FakeSession::new();
                 setup(&mut session);
                 ready_tx.send(()).unwrap();
@@ -896,5 +897,88 @@ fn render_play_and_stop() {
         stderr(&o).contains("the end must be after the start"),
         "{}",
         stderr(&o)
+    );
+}
+
+#[test]
+fn probes_ensure_and_list() {
+    let b = FakeBridge::start_with("probes", band);
+    let t = ok(&b.mort(&["probes"]));
+    assert!(
+        t.starts_with("0 probes")
+            && t.contains("no probe: MASTER, Drums, Kick, Bass, Bass DI, Verb"),
+        "{t}"
+    );
+
+    let t = ok(&b.mort(&["probes", "ensure", "bass", "verb", "--no-master"]));
+    assert!(
+        t.starts_with("probes: 2 added, 0 moved to the end, 0 duplicates removed"),
+        "{t}"
+    );
+    let fx = ok(&b.mort(&["fx", "bass"]));
+    assert!(
+        fx.contains("3  CLAP: mort probe (Vulpus Labs)"),
+        "the probe goes last: {fx}"
+    );
+
+    // An FX added after the probe pushes it off the end; ensure moves it back,
+    // and removes a second probe.
+    ok(&b.mort(&["fx", "add", "bass", "ReaEQ"]));
+    ok(&b.mort(&[
+        "fx",
+        "add",
+        "bass",
+        "CLAP: mort probe (Vulpus Labs)",
+        "--at",
+        "1",
+    ]));
+    let t = ok(&b.mort(&["probes", "ensure"]));
+    assert!(
+        t.starts_with("probes: 4 added, 1 moved to the end, 1 duplicates removed"),
+        "{t}"
+    );
+    let fx = ok(&b.mort(&["fx", "bass"]));
+    assert!(
+        fx.starts_with("FX on Bass (4)") && fx.contains("4  CLAP: mort probe"),
+        "{fx}"
+    );
+    let t = ok(&b.mort(&["probes"]));
+    assert!(t.starts_with("6 probes") && !t.contains("no probe:"), "{t}");
+    assert!(
+        t.contains("detached"),
+        "the fake's probes have no bridge slot: {t}"
+    );
+    assert!(ok(&b.mort(&["undo"])).starts_with("undid mort: ensure probes"));
+}
+
+#[test]
+fn install_bundles_the_probe_dylib() {
+    let root = tmp("bundle");
+    let (from, plugins, clap) = (
+        root.join("target"),
+        root.join("UserPlugins"),
+        root.join("CLAP"),
+    );
+    std::fs::create_dir_all(&from).unwrap();
+    std::fs::write(from.join("libmort_bridge.dylib"), "bridge").unwrap();
+    std::fs::write(from.join("libmort_probe.dylib"), "probe").unwrap();
+    let t = ok(&install(&from, &plugins, &clap));
+    assert!(
+        t.contains("probe   ") && t.contains("mort-probe.clap"),
+        "{t}"
+    );
+    let b = clap.join("mort-probe.clap/Contents");
+    assert_eq!(
+        std::fs::read_to_string(b.join("MacOS/mort-probe")).unwrap(),
+        "probe"
+    );
+    assert!(
+        std::fs::read_to_string(b.join("Info.plist"))
+            .unwrap()
+            .contains("com.vulpuslabs.mort.probe")
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.join("PkgInfo")).unwrap(),
+        "BNDL????"
     );
 }

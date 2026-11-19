@@ -32,7 +32,7 @@ import json, socket, sys
 
 sock = sys.argv[1]
 s = socket.socket(socket.AF_UNIX)
-s.settimeout(5)
+s.settimeout(30)
 try:
     s.connect(sock)
 except OSError as e:
@@ -311,6 +311,71 @@ _time.sleep(0.5)
 call("stop")
 done = wait_job(job)
 check("stop ends a play early", done.get("result", {}).get("stopped_early") is True, str(done.get("result")))
+
+# --- Probes (ticket 0011) ---------------------------------------------------
+r, e = edit("track.add", {"name": "Synth"}, "smoke synth track")
+synth = r["track"]
+edit("track.set", {"track": synth, "volume": 0.0}, "smoke synth silent")  # the probe is pre-fader
+r, e = edit("fx.add", {"track": synth, "plugin": "ReaSynth"}, "smoke reasynth")
+check("ReaSynth added", e is None, str(e))
+edit("midi.write", {"track": synth, "notes": [
+    {"pitch": 48, "start": 0.0, "end": 4.0, "velocity": 110},
+    {"pitch": 55, "start": 14.0, "end": 18.0, "velocity": 110}]}, "smoke synth notes")
+r, e = edit("probes.ensure", {}, "smoke probes")
+plist = call("probes.list")["result"]
+probes = plist["probes"]
+n_tracks = len(call("tracks.list")["result"]["tracks"]) + 1
+check("a probe on every track and the master, last, attached",
+      e is None and len(probes) == n_tracks and not plist["unmeasured"]
+      and all(p["last"] and p["attached"] and p["slot"] for p in probes),
+      str(e or [(p["name"], p["slot"], p["last"], p["attached"], p["active"]) for p in probes]))
+_time.sleep(1.0)  # let REAPER activate the new instances
+probes = call("probes.list")["result"]["probes"]
+check("probes active with a sample rate", all(p["active"] and p["sample_rate"] for p in probes),
+      str([(p["name"], p["active"], p["sample_rate"]) for p in probes]))
+slot = next(p["slot"] for p in probes if p["name"] == "Synth")
+
+def frames(slot, run, start, end):
+    """The run's frames inside [start, end), and how many came after it.
+    REAPER processes a few blocks past the end of a render or play; mort's
+    captures clip to the range (ADR 0006)."""
+    fr = call("probes.peek", {"slot": slot, "run": run, "limit": 100000})["result"]["frames"]
+    inside = [f for f in fr if start - 1e-6 <= f["start"] < end - 1e-6]
+    after = [f for f in fr if f["start"] >= end - 1e-6]
+    return inside, len(fr) - len(inside) - len(after)
+
+r = call("render", {"start": 0.0, "end": 4.0})
+done = wait_job(r["result"]["job"])
+run = done.get("result", {}).get("run")
+fr, before = frames(slot, run, 0.0, 4.0)
+starts = [f["start"] for f in fr]
+steps = [b - a for a, b in zip(starts, starts[1:])]
+loud = [f["momentary_lufs"] for f in fr[10:]]
+check("render: 80 frames, 50 ms apart from 0 s, stamped with the run",
+      len(fr) == 80 and before == 0 and abs(starts[0]) < 0.011 and all(abs(s - 0.05) < 1e-6 for s in steps),
+      f"{len(fr)} frames, first at {starts[:1]}, steps {min(steps, default=0):.6f}..{max(steps, default=0):.6f}")
+check("render: the synth is heard", loud and min(loud) > -40, f"momentary {min(loud, default=0):.1f}..{max(loud, default=0):.1f} LUFS")
+
+r = call("play", {"start": 0.0, "end": 2.0})
+done = wait_job(r["result"]["job"])
+run = done.get("result", {}).get("run")
+fr, before = frames(slot, run, 0.0, 2.0)
+starts = [f["start"] for f in fr]
+steps = [b - a for a, b in zip(starts, starts[1:])]
+check("live play: frames on the timeline",
+      len(fr) == 40 and before == 0 and abs(starts[0]) < 0.05 and all(abs(s - 0.05) < 1e-6 for s in steps),
+      f"{len(fr)} frames, first at {starts[:1]}, steps {min(steps, default=0):.6f}..{max(steps, default=0):.6f}")
+
+r = call("render", {"start": 14.0, "end": 18.0})
+done = wait_job(r["result"]["job"])
+fr, before = frames(slot, done.get("result", {}).get("run"), 14.0, 18.0)
+starts = [f["start"] for f in fr]
+steps = [b - a for a, b in zip(starts, starts[1:])]
+check("render across the tempo change: evenly spaced",
+      len(fr) == 80 and before == 0 and abs(starts[0] - 14.0) < 0.011 and all(abs(s - 0.05) < 1e-6 for s in steps),
+      f"{len(fr)} frames from {starts[:1]}")
+probes = call("probes.list")["result"]["probes"]
+check("no frames dropped", all(p["dropped"] == 0 for p in probes), str([(p["name"], p["dropped"]) for p in probes]))
 
 check("every edit left an undo point", not no_undo_point, ", ".join(no_undo_point) or "all did")
 

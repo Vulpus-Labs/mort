@@ -12,7 +12,10 @@ use mort_proto::{ErrorObject, FxId, Position, Range, TrackId};
 use mort_session::Session;
 
 use crate::dispatch::{Ctx, Dispatcher, Job, JobPoll, Outcome};
-use crate::runs;
+use crate::{probes, runs};
+use mort_link::Slot;
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 fn parse<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, ErrorObject> {
     let params = if params.is_null() { json!({}) } else { params };
@@ -656,6 +659,135 @@ pub fn register_transport<S: Session + 'static>(d: &mut Dispatcher<S>) {
     d.register("stop", false, |ctx: &mut Ctx<'_, S>, _| {
         ctx.session.stop();
         Outcome::Value(Ok(json!({ "position": ctx.session.position() })))
+    });
+}
+
+// --- Probes (ticket 0011) -------------------------------------------------
+
+/// The probe as REAPER names it.
+pub const PROBE_PLUGIN: &str = "CLAP: mort probe (Vulpus Labs)";
+
+fn is_probe(fx: &mort_proto::model::FxInfo) -> bool {
+    fx.plugin.contains("mort probe")
+}
+
+#[derive(Deserialize)]
+struct ProbesEnsure {
+    #[serde(default)]
+    tracks: Option<Vec<TrackId>>,
+    #[serde(default = "yes")]
+    master: bool,
+}
+
+#[derive(Deserialize)]
+struct ProbesPeek {
+    slot: u32,
+    run: u64,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// The slot a probe shows in its `slot` parameter, if it has one.
+fn probe_slot<S: Session>(s: &S, fx: mort_proto::FxId) -> Option<u32> {
+    let p = s.params(fx).ok()?.into_iter().find(|p| p.name == "slot")?;
+    let v: f64 = p.display.trim().parse().ok()?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "slot ids are small and positive"
+    )]
+    let id = v.round() as u32;
+    (id > 0).then_some(id)
+}
+
+/// Registers `probes.ensure`, `probes.list` and `probes.peek` (ticket 0011).
+pub fn register_probes<S: Session + 'static>(d: &mut Dispatcher<S>) {
+    edit(d, "probes.ensure", |s: &mut S, p: ProbesEnsure| {
+        let mut targets: Vec<TrackId> = match p.tracks {
+            Some(t) => t,
+            None => s.tracks().into_iter().map(|t| t.id).collect(),
+        };
+        if p.master && !targets.contains(&s.master()) {
+            targets.push(s.master());
+        }
+        let (mut added, mut moved, mut removed) = (0, 0, 0);
+        let mut out = Vec::new();
+        for t in targets {
+            let info = s.track(t)?;
+            let probes: Vec<_> = info.fx.iter().filter(|f| is_probe(f)).collect();
+            let keep = match probes.first() {
+                None => {
+                    added += 1;
+                    s.add_fx(t, PROBE_PLUGIN, None)?
+                }
+                Some(first) => first.id,
+            };
+            for extra in probes.iter().skip(1) {
+                s.remove_fx(extra.id)?;
+                removed += 1;
+            }
+            let chain = s.track(t)?.fx;
+            let last = chain.len() - 1;
+            if chain.iter().position(|f| f.id == keep) != Some(last) {
+                s.move_fx(keep, last)?;
+                moved += 1;
+            }
+            out.push(json!({ "track": t, "fx": keep }));
+        }
+        Ok(json!({ "probes": out, "added": added, "moved": moved, "removed": removed }))
+    });
+    read(d, "probes.list", |s: &S, _: NoParams| {
+        let counts = probes::counts();
+        let mut list = Vec::new();
+        let mut unmeasured = Vec::new();
+        let all = std::iter::once(s.track(s.master())?).chain(s.tracks());
+        for t in all {
+            let found: Vec<_> = t.fx.iter().filter(|f| is_probe(f)).collect();
+            if found.is_empty() {
+                unmeasured.push(json!({ "track": t.id, "name": t.name }));
+            }
+            for f in found {
+                let slot = probe_slot(s, f.id);
+                let link = slot.and_then(probes::slot);
+                let buffered: HashMap<String, usize> = slot
+                    .and_then(|id| counts.get(&id))
+                    .map(|m| m.iter().map(|(run, n)| (run.to_string(), *n)).collect())
+                    .unwrap_or_default();
+                list.push(json!({
+                    "track": t.id,
+                    "name": t.name,
+                    "fx": f.id,
+                    "last": f.index + 1 == t.fx.len(),
+                    "enabled": f.enabled,
+                    "slot": slot,
+                    "attached": link.is_some_and(|l| l.attached.load(Ordering::Relaxed)),
+                    "active": link.is_some_and(|l| l.active.load(Ordering::Relaxed) > 0),
+                    "sample_rate": link.and_then(Slot::sample_rate),
+                    "pushed": link.map(|l| l.pushed.load(Ordering::Relaxed)),
+                    "dropped": link.map(|l| l.dropped.load(Ordering::Relaxed)),
+                    "buffered": buffered,
+                }));
+            }
+        }
+        Ok(json!({ "probes": list, "unmeasured": unmeasured, "run": runs::current() }))
+    });
+    read(d, "probes.peek", |_: &S, p: ProbesPeek| {
+        probes::drain();
+        let recs = probes::peek(p.slot, p.run, p.limit.unwrap_or(1000));
+        let frames: Vec<Value> = recs
+            .iter()
+            .map(|r| {
+                json!({
+                    "start": r.start,
+                    "index": r.frame.index,
+                    "momentary_lufs": r.frame.momentary_lufs,
+                    "rms_dbfs": r.frame.rms_dbfs,
+                    "true_peak_dbtp": r.frame.true_peak_dbtp,
+                    "centroid_hz": r.frame.centroid_hz,
+                })
+            })
+            .collect();
+        Ok(json!({ "frames": frames }))
     });
 }
 

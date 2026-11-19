@@ -1,0 +1,14 @@
+[package]
+name = "mort-link"
+description = "The contract between mort's probe and bridge: attach function, slots, and the lock-free frame ring"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mort-features = { path = "../mort-features" }
+
+[lints]
+workspace = true

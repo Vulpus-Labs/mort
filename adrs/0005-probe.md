@@ -30,8 +30,12 @@ whether the project is playing in real time or rendering faster.
    `mort_probe_attach`, which the bridge registers with
    `plugin_register("API_mort_probe_attach")`. Attach returns a slot
    number and a pointer to a single-producer, single-consumer ring the
-   bridge owns. The probe writes frames into the ring. The bridge reads them
-   on a timer.
+   bridge owns. The probe writes frames into the ring. Because a render
+   holds REAPER's main thread, the bridge empties the rings on a thread of
+   its own, every 5 ms, which reads memory and never calls REAPER.
+   Confirmed in REAPER 7.67: `GetFunc` finds an `API_` function another
+   extension registered, from a CLAP plugin. The contract (versioned and
+   size-checked) lives in `mort-link`.
 5. **Identity.** The probe shows its slot number as a read-only parameter,
    `slot`. The bridge reads `slot` from every probe instance it finds in the
    FX chains, so it knows which track, bus or master each slot belongs to.

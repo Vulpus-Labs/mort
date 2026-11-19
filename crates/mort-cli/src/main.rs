@@ -8,6 +8,7 @@ mod client;
 mod edits;
 mod install;
 mod midi;
+mod probes;
 mod resolve;
 mod show;
 mod smf;
@@ -103,6 +104,12 @@ enum Command {
 
     /// Stop playback.
     Stop,
+
+    /// List the probes, or put one last in each chain.
+    Probes {
+        #[command(subcommand)]
+        action: Option<probes::ProbesCmd>,
+    },
 
     /// Undo mort's last edit. Refuses if the last edit was not mort's.
     Undo,
@@ -205,6 +212,7 @@ fn yes_no(v: &Value) -> &'static str {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one short arm per command")]
 fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
     match &cli.command {
         Command::Status => {
@@ -267,6 +275,7 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
         Command::Play(a) => edited(cli, |c| transport::run(c, a, false)),
         Command::Render(a) => edited(cli, |c| transport::run(c, a, true)),
         Command::Stop => edited(cli, transport::stop),
+        Command::Probes { action } => edited(cli, |c| probes::run(c, action.as_ref())),
         Command::Undo => edited(cli, |c| edits::undo(c, false)),
         Command::Redo => edited(cli, |c| edits::undo(c, true)),
         Command::Fx {

@@ -10,5 +10,11 @@ publish.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[dependencies]
+mort-features = { path = "../mort-features" }
+mort-link = { path = "../mort-link" }
+clack-plugin = { git = "https://github.com/prokopyl/clack", rev = "f874e858ad576c601367b3038af5088a4e671744" }
+clack-extensions = { git = "https://github.com/prokopyl/clack", rev = "f874e858ad576c601367b3038af5088a4e671744", features = ["audio-ports", "params", "clack-plugin"] }
+
 [lints]
 workspace = true

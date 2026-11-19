@@ -11,6 +11,7 @@
 
 pub mod dispatch;
 pub mod methods;
+pub mod probes;
 pub mod runs;
 pub mod server;
 

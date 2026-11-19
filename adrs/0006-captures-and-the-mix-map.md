@@ -36,11 +36,14 @@ longer match the project are worse than none.
      written. It is the default.
    - `play` mode plays the range through the person's monitors in real
      time, for when the person wants to listen too.
-5. **Persistence.** Captures are saved in a sidecar directory next to the
+5. **Clipping.** REAPER processes a few blocks past the end of a play or
+   render (about 150 ms of frames for a render in REAPER 7.67). A capture
+   keeps only frames that start inside its range.
+6. **Persistence.** Captures are saved in a sidecar directory next to the
    project file, `<project>.mort/captures/`, in a compact binary format
    with a JSON index. They reload when the project opens. An unsaved
    project keeps its captures in memory only.
-6. **Size:** a frame is 220 bytes (ADR 0007). Five minutes of
+7. **Size:** a frame is 220 bytes (ADR 0007). Five minutes of
    40 tracks is about 53 MB. Old captures that are fully replaced are
    deleted.
 

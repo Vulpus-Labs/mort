@@ -23,7 +23,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use reaper_medium::{
     CommandId, HookCommand, OwnedGaccelRegister, PositionInQuarterNotes, PositionInSeconds,
-    ProjectContext, Reaper, ReaperSession, ToggleAction, ToggleActionResult, UndoScope,
+    ProjectContext, Reaper, ReaperSession, RegistrationObject, ToggleAction, ToggleActionResult,
+    UndoScope,
 };
 
 use mort_proto::model::{
@@ -99,6 +100,15 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
     ))?;
     session.plugin_register_add_hook_command::<HoldEdits>()?;
     session.plugin_register_add_toggle_action::<HoldEdits>()?;
+    // SAFETY: `attach` has the signature probes expect and lives as long as
+    // the extension.
+    unsafe {
+        session.plugin_register_add(RegistrationObject::api(
+            "mort_probe_attach",
+            crate::probes::attach as *mut std::ffi::c_void,
+        ))?;
+    }
+    crate::probes::start_draining();
     let (tx, rx) = mpsc::channel();
     let server = Server::start(&socket_dir(), &std::process::id().to_string(), tx)?;
     log(&format!(
@@ -119,6 +129,7 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
                 crate::methods::register_automation(&mut d);
                 crate::methods::register_midi(&mut d);
                 crate::methods::register_transport(&mut d);
+                crate::methods::register_probes(&mut d);
                 d
             },
             _server: server,

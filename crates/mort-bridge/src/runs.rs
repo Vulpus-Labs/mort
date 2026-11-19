@@ -10,6 +10,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(1);
 static CURRENT: AtomicU64 = AtomicU64::new(0);
 
+/// The atomic probes read the current run from.
+#[must_use]
+pub fn atomic() -> &'static AtomicU64 {
+    &CURRENT
+}
+
 /// Starts a new run and returns its id.
 pub fn begin() -> u64 {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
