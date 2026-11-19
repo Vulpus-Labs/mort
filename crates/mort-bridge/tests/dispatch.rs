@@ -369,3 +369,40 @@ fn socket_is_private_and_cleaned_up() {
     assert!(!path.exists());
     assert!(!current.exists());
 }
+
+#[test]
+fn a_failed_edit_never_undoes_the_one_before() {
+    let mut r = rig("rollback");
+    let mut c = r.connect();
+    let bass = r.call(
+        &mut c,
+        "track.add",
+        json!({ "name": "bass", "summary": "add bass" }),
+    )["result"]
+        .clone();
+    let ghost = "{00000000-0000-0000-0000-00000000002A}";
+    let v = r.call(
+        &mut c,
+        "track.mute",
+        json!({ "track": ghost, "summary": "mute ghost" }),
+    );
+    assert_eq!(error_kind(&v), "not_found");
+    assert_eq!(r.session.undo_label().as_deref(), Some("mort: add bass"));
+    assert_eq!(r.session.tracks().len(), 1, "the earlier edit stands");
+
+    // A failure after a real change is rolled back through its own point.
+    let v = r.call(
+        &mut c,
+        "batch",
+        json!({ "summary": "half", "calls": [
+            { "method": "track.mute", "params": { "track": bass } },
+            { "method": "track.mute", "params": { "track": ghost } },
+        ]}),
+    );
+    assert_eq!(error_kind(&v), "not_found");
+    assert!(
+        !r.session.tracks()[0].mute,
+        "the first mute was rolled back"
+    );
+    assert_eq!(r.session.undo_label().as_deref(), Some("mort: add bass"));
+}

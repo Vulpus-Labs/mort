@@ -233,6 +233,8 @@ pub struct FakeSession {
     redo_stack: Vec<(String, Project)>,
     playing: Option<(f64, f64)>,
     position: f64,
+    saved_to: Vec<String>,
+    saved_state: u64,
 }
 
 impl Default for FakeSession {
@@ -276,6 +278,8 @@ impl FakeSession {
             redo_stack: vec![],
             playing: None,
             position: 0.0,
+            saved_to: vec![],
+            saved_state: 1,
         }
     }
 
@@ -283,6 +287,12 @@ impl FakeSession {
     pub fn set_tempo_map(&mut self, map: SteppedTempoMap) {
         self.tempo = map;
         self.changed();
+    }
+
+    /// The paths `save_project` has written to, oldest first.
+    #[must_use]
+    pub fn saved_to(&self) -> &[String] {
+        &self.saved_to
     }
 
     /// Adds a plugin to the catalogue.
@@ -533,6 +543,7 @@ impl Session for FakeSession {
             path: None,
             sample_rate: self.sample_rate,
             length,
+            dirty: self.state != self.saved_state,
         }
     }
 
@@ -1013,7 +1024,24 @@ impl Session for FakeSession {
         Ok(())
     }
 
+    fn save_project(&mut self, path: Option<&str>) -> Result<()> {
+        match path {
+            Some(p) => {
+                self.saved_to.push(p.to_owned());
+                Ok(())
+            }
+            None => Err(invalid(
+                "the project has never been saved",
+                None,
+                "give a path to save it to",
+            )),
+        }
+    }
+
     fn begin_undo(&mut self) {
+        // REAPER moves the state count when a block opens, even if nothing
+        // then changes; the fake does the same so callers cannot rely on it.
+        self.changed();
         self.open_block = Some((self.project.clone(), self.state));
     }
 
@@ -1028,6 +1056,10 @@ impl Session for FakeSession {
 
     fn undo_label(&self) -> Option<String> {
         self.undo_stack.last().map(|(l, _)| l.clone())
+    }
+
+    fn redo_label(&self) -> Option<String> {
+        self.redo_stack.last().map(|(l, _)| l.clone())
     }
 
     fn undo(&mut self) -> Option<String> {

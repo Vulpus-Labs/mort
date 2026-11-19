@@ -296,6 +296,149 @@ pub fn project_path(r: &Reaper) -> Option<String> {
     read_buf(4096, |b, n| unsafe { !r.EnumProjects(-1, b, n).is_null() }).filter(|s| !s.is_empty())
 }
 
+// --- Edits -----------------------------------------------------------------
+
+/// Inserts a track at `idx` with REAPER's default FX and envelopes, and
+/// returns it.
+pub fn insert_track(r: &Reaper, idx: c_int) -> *mut MediaTrack {
+    // SAFETY: main thread, current project; `idx` is within 0..=count.
+    unsafe {
+        r.InsertTrackInProject(null_mut(), idx, 1);
+        r.GetTrack(null_mut(), idx)
+    }
+}
+
+/// Deletes a track.
+pub fn delete_track(r: &Reaper, t: *mut MediaTrack) {
+    // SAFETY: `t` is a live track; it is not used afterwards.
+    unsafe { r.DeleteTrack(t) }
+}
+
+/// Sets a numeric track property.
+pub fn set_track_value(r: &Reaper, t: *mut MediaTrack, name: &str, v: f64) -> bool {
+    let n = cstr(name);
+    // SAFETY: `t` is a live track.
+    unsafe { r.SetMediaTrackInfo_Value(t, n.as_ptr(), v) }
+}
+
+/// Sets a string track property, such as `P_NAME`.
+pub fn set_track_string(r: &Reaper, t: *mut MediaTrack, name: &str, v: &str) -> bool {
+    let n = cstr(name);
+    let mut v = cstr(v).into_bytes_with_nul();
+    // SAFETY: `t` is a live track; REAPER reads the NUL-terminated value.
+    unsafe { r.GetSetMediaTrackInfo_String(t, n.as_ptr(), v.as_mut_ptr().cast(), true) }
+}
+
+/// How deep a track is nested in folders; 0 at the top level.
+pub fn track_depth(r: &Reaper, t: *mut MediaTrack) -> c_int {
+    // SAFETY: `t` is a live track.
+    unsafe { r.GetTrackDepth(t) }
+}
+
+/// Adds a send and returns its index.
+pub fn create_send(r: &Reaper, from: *mut MediaTrack, to: *mut MediaTrack) -> c_int {
+    // SAFETY: both are live tracks.
+    unsafe { r.CreateTrackSend(from, to) }
+}
+
+/// Sets a numeric property of a send.
+pub fn set_send_value(r: &Reaper, t: *mut MediaTrack, send: c_int, name: &str, v: f64) -> bool {
+    let n = cstr(name);
+    // SAFETY: `t` is a live track and `send` is below `send_count`.
+    unsafe { r.SetTrackSendInfo_Value(t, 0, send, n.as_ptr(), v) }
+}
+
+/// Adds a plugin by name, at `index` or the end. Returns its position, or
+/// `None` if REAPER cannot find the plugin.
+pub fn fx_add(r: &Reaper, t: *mut MediaTrack, plugin: &str, index: Option<c_int>) -> Option<c_int> {
+    let n = cstr(plugin);
+    // -1 always adds a new instance; -1000 - n inserts at position n.
+    let instantiate = index.map_or(-1, |i| -1000 - i);
+    // SAFETY: `t` is a live track.
+    let i = unsafe { r.TrackFX_AddByName(t, n.as_ptr(), false, instantiate) };
+    (i >= 0).then_some(i)
+}
+
+/// Removes an FX instance.
+pub fn fx_delete(r: &Reaper, t: *mut MediaTrack, fx: c_int) -> bool {
+    // SAFETY: `t` is a live track.
+    unsafe { r.TrackFX_Delete(t, fx) }
+}
+
+/// Moves an FX instance within its chain.
+pub fn fx_move(r: &Reaper, t: *mut MediaTrack, fx: c_int, to: c_int) {
+    // SAFETY: `t` is a live track; both indices are within the chain.
+    unsafe { r.TrackFX_CopyToTrack(t, fx, t, to, true) }
+}
+
+/// Enables or bypasses an FX instance.
+pub fn fx_set_enabled(r: &Reaper, t: *mut MediaTrack, fx: c_int, enabled: bool) {
+    // SAFETY: `t` is a live track.
+    unsafe { r.TrackFX_SetEnabled(t, fx, enabled) }
+}
+
+/// Sets a parameter, normalised.
+pub fn param_set(r: &Reaper, t: *mut MediaTrack, fx: c_int, p: c_int, v: f64) -> bool {
+    // SAFETY: `t` is a live track.
+    unsafe { r.TrackFX_SetParamNormalized(t, fx, p, v) }
+}
+
+/// Loads a named preset.
+pub fn fx_set_preset(r: &Reaper, t: *mut MediaTrack, fx: c_int, name: &str) -> bool {
+    let n = cstr(name);
+    // SAFETY: `t` is a live track.
+    unsafe { r.TrackFX_SetPreset(t, fx, n.as_ptr()) }
+}
+
+/// A track's state chunk.
+pub fn track_chunk(r: &Reaper, t: *mut MediaTrack) -> Option<String> {
+    let mut size = 1 << 16;
+    while size <= 1 << 28 {
+        // SAFETY: `t` is a live track; REAPER fails rather than overflow.
+        if let Some(s) = read_buf(size, |b, n| unsafe { r.GetTrackStateChunk(t, b, n, false) }) {
+            // A full buffer may mean the chunk was cut short.
+            if s.len() + 1 < size {
+                return Some(s);
+            }
+        }
+        size *= 4;
+    }
+    None
+}
+
+/// Replaces a track's state chunk.
+pub fn set_track_chunk(r: &Reaper, t: *mut MediaTrack, chunk: &str) -> bool {
+    let Ok(c) = CString::new(chunk) else {
+        return false;
+    };
+    // SAFETY: `t` is a live track.
+    unsafe { r.SetTrackStateChunk(t, c.as_ptr(), false) }
+}
+
+/// Saves the current project to its file, or as a copy at `path`.
+pub fn save_project(r: &Reaper, path: Option<&str>) {
+    // SAFETY: main thread, current project.
+    unsafe {
+        match path {
+            None => r.Main_SaveProject(null_mut(), false),
+            Some(p) => {
+                let c = cstr(p);
+                r.Main_SaveProjectEx(null_mut(), c.as_ptr(), 0);
+            }
+        }
+    }
+}
+
+/// The label of the undo point that redo would redo.
+pub fn redo_label(r: &Reaper) -> Option<String> {
+    // SAFETY: main thread, current project; the string is REAPER's and
+    // read at once.
+    unsafe {
+        let p = r.Undo_CanRedo2(null_mut());
+        (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

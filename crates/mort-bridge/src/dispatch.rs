@@ -365,6 +365,8 @@ impl<S: Session> Dispatcher<S> {
                 },
             },
             "batch" => self.batch(session, req.params),
+            "undo" => self.undo_redo(session, true),
+            "redo" => self.undo_redo(session, false),
             method => self.call(session, method, req.params),
         };
         Some(match result {
@@ -536,9 +538,51 @@ impl<S: Session> Dispatcher<S> {
         }
         let ep: EditParams = parse(method, params.clone())?;
         let label = ep.summary.unwrap_or_else(|| method.to_owned());
-        self.edit(session, ep.expect_state, &label, |d, s| {
+        let mut v = self.edit(session, ep.expect_state, &label, |d, s| {
             d.run(s, method, params)
-        })
+        })?;
+        if let Value::Object(o) = &mut v {
+            o.insert("state".into(), json!(session.state()));
+        }
+        Ok(v)
+    }
+
+    fn held_error() -> ErrorObject {
+        ErrorObject::new(
+            ErrorKind::Busy,
+            "edits are held in REAPER",
+            None,
+            "wait, or ask the person at REAPER to release *mort: hold edits*",
+        )
+    }
+
+    /// Undoes or redoes the top undo point, if it is mort's (ADR 0004 §5).
+    fn undo_redo(&mut self, session: &mut S, undo: bool) -> Result<Value, ErrorObject> {
+        if self.held {
+            return Err(Self::held_error());
+        }
+        let (word, label) = if undo {
+            ("undo", session.undo_label())
+        } else {
+            ("redo", session.redo_label())
+        };
+        let Some(label) = label else {
+            return Err(invalid(
+                format!("there is nothing to {word}"),
+                "nothing to do",
+            ));
+        };
+        if !label.starts_with("mort:") {
+            return Err(ErrorObject::new(
+                ErrorKind::Invalid,
+                format!("the next {word} is not mort's: `{label}`"),
+                Some(label),
+                format!("mort only {word}s its own edits; {word} this one in REAPER"),
+            ));
+        }
+        let done = if undo { session.undo() } else { session.redo() };
+        self.mort_state = Some(session.state());
+        Ok(json!({ "label": done, "state": session.state() }))
     }
 
     fn run(&mut self, session: &mut S, method: &str, params: Value) -> Result<Value, ErrorObject> {
@@ -574,12 +618,7 @@ impl<S: Session> Dispatcher<S> {
         body: impl FnOnce(&mut Self, &mut S) -> Result<Value, ErrorObject>,
     ) -> Result<Value, ErrorObject> {
         if self.held {
-            return Err(ErrorObject::new(
-                ErrorKind::Busy,
-                "edits are held in REAPER",
-                None,
-                "wait, or ask the person at REAPER to release *mort: hold edits*",
-            ));
+            return Err(Self::held_error());
         }
         let before = session.state();
         if let Some(expected) = expect_state
@@ -593,9 +632,14 @@ impl<S: Session> Dispatcher<S> {
             ));
         }
         let jobs_before = self.next_job;
+        let label = format!("mort: {label}");
         session.begin_undo();
+        // REAPER moves the state count when a block opens or closes, even
+        // with nothing in it, so change is judged inside the block only.
+        let opened = session.state();
         let result = body(self, session);
-        session.end_undo(&format!("mort: {label}"));
+        let changed = session.state() != opened;
+        session.end_undo(&label);
         let result = if self.next_job == jobs_before {
             result
         } else {
@@ -609,7 +653,9 @@ impl<S: Session> Dispatcher<S> {
                 "send play, render and measure on their own",
             ))
         };
-        if result.is_err() && session.state() != before {
+        // Roll back a failed edit, but only through its own undo point:
+        // never undo whatever came before it.
+        if result.is_err() && changed && session.undo_label().as_deref() == Some(label.as_str()) {
             session.undo();
         }
         self.mort_state = Some(session.state());
@@ -620,7 +666,7 @@ impl<S: Session> Dispatcher<S> {
         let p: BatchParams = parse("batch", params)?;
         let mut edits = false;
         for c in &p.calls {
-            if c.method == "batch"
+            if ["batch", "undo", "redo"].contains(&c.method.as_str())
                 || c.method.starts_with("job.")
                 || c.method.starts_with("bridge.")
             {

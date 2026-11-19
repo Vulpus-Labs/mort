@@ -18,6 +18,9 @@ pub struct ProjectInfo {
     pub sample_rate: f64,
     /// The project length in seconds.
     pub length: f64,
+    /// Whether it has changes not yet saved.
+    #[serde(default)]
+    pub dirty: bool,
 }
 
 /// A region (a section of the piece) or a marker.

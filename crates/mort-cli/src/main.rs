@@ -4,6 +4,7 @@
 //! 2 a usage error, 3 no bridge running.
 
 mod client;
+mod edits;
 mod install;
 mod resolve;
 mod show;
@@ -49,11 +50,46 @@ enum Command {
     /// List tracks with their levels, FX and sends.
     Tracks,
 
-    /// List the FX on a track.
+    /// Add, remove or change a track.
+    #[command(subcommand)]
+    Track(edits::TrackCmd),
+
+    /// Add or change a send.
+    #[command(subcommand)]
+    Send(edits::SendCmd),
+
+    /// List the FX on a track (`mort fx <track>`), or change them.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Fx {
         /// The track: number, name, part of a name, id, or `master`.
-        track: String,
+        #[arg(required = true)]
+        track: Option<String>,
+        #[command(subcommand)]
+        action: Option<edits::FxCmd>,
     },
+
+    /// Set a parameter, by the text the plugin shows (`-3 dB`, `2.4 kHz`)
+    /// or, with --normalised, by a value from 0 to 1.
+    Set {
+        /// The track.
+        track: String,
+        /// The FX.
+        fx: String,
+        /// The parameter: its number (from 0) or name.
+        param: String,
+        /// The value.
+        #[arg(allow_hyphen_values = true)]
+        value: String,
+        /// Read the value as normalised, 0 to 1.
+        #[arg(long)]
+        normalised: bool,
+    },
+
+    /// Undo mort's last edit. Refuses if the last edit was not mort's.
+    Undo,
+
+    /// Redo mort's last undone edit.
+    Redo,
 
     /// List an FX instance's parameters.
     Params {
@@ -123,6 +159,16 @@ fn connect(cli: &Cli) -> Result<(Client, Value), Failure> {
     Client::connect(&path)
 }
 
+/// Runs an edit command and prints its lines, or its raw result.
+fn edited(
+    cli: &Cli,
+    f: impl FnOnce(&mut Client) -> Result<(Vec<String>, Value), Failure>,
+) -> Result<Vec<String>, Outcome> {
+    let (mut c, _) = connect(cli)?;
+    let (lines, result) = f(&mut c)?;
+    Ok(with_state(cli, &result, lines))
+}
+
 /// Text lines with the state last (ADR 0009 §2), or the raw result.
 fn with_state(cli: &Cli, result: &Value, mut lines: Vec<String>) -> Vec<String> {
     if cli.json {
@@ -181,7 +227,28 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
             let list = c.call("tracks.list", Value::Null)?;
             Ok(with_state(cli, &list, show::tracks(&list)))
         }
-        Command::Fx { track } => {
+        Command::Track(cmd) => edited(cli, |c| edits::track(c, cmd)),
+        Command::Send(cmd) => edited(cli, |c| edits::send(c, cmd)),
+        Command::Fx {
+            action: Some(cmd), ..
+        } => edited(cli, |c| edits::fx(c, cmd)),
+        Command::Set {
+            track,
+            fx,
+            param,
+            value,
+            normalised,
+        } => edited(cli, |c| edits::set(c, track, fx, param, value, *normalised)),
+        Command::Fx {
+            track: None,
+            action: None,
+        } => Err(Outcome::Usage("name a track: `mort fx <track>`".into())),
+        Command::Undo => edited(cli, |c| edits::undo(c, false)),
+        Command::Redo => edited(cli, |c| edits::undo(c, true)),
+        Command::Fx {
+            track: Some(track),
+            action: None,
+        } => {
             let (mut c, _) = connect(cli)?;
             let list = c.call("tracks.list", Value::Null)?;
             let t = resolve::track(&list, track)?;
@@ -209,18 +276,28 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
             from,
             user_plugins,
             clap_dir,
-        } => {
-            let mut places = install::Places::default_for_user();
-            if let Some(f) = from {
-                places.from.clone_from(f);
-            }
-            if let Some(u) = user_plugins {
-                places.user_plugins.clone_from(u);
-            }
-            if let Some(c) = clap_dir {
-                places.clap.clone_from(c);
-            }
-            Ok(install::run(&places, install::reaper_running())?)
-        }
+        } => Ok(install_cmd(
+            from.as_ref(),
+            user_plugins.as_ref(),
+            clap_dir.as_ref(),
+        )?),
     }
+}
+
+fn install_cmd(
+    from: Option<&PathBuf>,
+    user_plugins: Option<&PathBuf>,
+    clap_dir: Option<&PathBuf>,
+) -> Result<Vec<String>, Failure> {
+    let mut places = install::Places::default_for_user();
+    if let Some(f) = from {
+        places.from.clone_from(f);
+    }
+    if let Some(u) = user_plugins {
+        places.user_plugins.clone_from(u);
+    }
+    if let Some(c) = clap_dir {
+        places.clap.clone_from(c);
+    }
+    install::run(&places, install::reaper_running())
 }

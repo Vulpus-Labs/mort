@@ -300,6 +300,16 @@ pub trait Session {
     /// `not_found`; `invalid` if the item is not MIDI.
     fn delete_midi(&mut self, item: ItemId, start: f64, end: f64) -> Result<()>;
 
+    /// Saves the project to its own file, or, given `path`, writes a copy
+    /// there. A copy leaves the project's file and unsaved changes as they
+    /// were (that is what REAPER's `Main_SaveProjectEx` does). This is the
+    /// only way mort writes a project file (ADR 0004 §6).
+    ///
+    /// # Errors
+    ///
+    /// `invalid` if the project has never been saved and no path is given.
+    fn save_project(&mut self, path: Option<&str>) -> Result<()>;
+
     // --- Undo ------------------------------------------------------------
 
     /// Starts an undo block. Every change until [`Session::end_undo`] is
@@ -312,6 +322,9 @@ pub trait Session {
 
     /// The label of the undo point that `undo` would undo.
     fn undo_label(&self) -> Option<String>;
+
+    /// The label of the undo point that `redo` would redo.
+    fn redo_label(&self) -> Option<String>;
 
     /// Undoes the last undo point and returns its label.
     fn undo(&mut self) -> Option<String>;

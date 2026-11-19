@@ -33,7 +33,15 @@ act on a picture of the project the person has since changed.
    undoes the person's work.
 6. **No destructive file operations.** mort never deletes media files and
    never saves the project over its file unless asked with `project.save`.
-   Renders for measurement go to a scratch directory (ADR 0006).
+   Given a path, `project.save` writes a copy there and leaves the
+   project's own file and unsaved changes alone, which is what REAPER's
+   `Main_SaveProjectEx` does. `project.get` reports `dirty`. Renders for
+   measurement go to a scratch directory (ADR 0006).
+7. **Rollback goes through the failed edit's own undo point.** REAPER
+   moves the state count when an undo block opens or closes, even if
+   nothing changed. So a failed edit is rolled back only if the state
+   moved inside its block and the top undo point carries its label. It can
+   never undo the edit before it.
 
 ## Consequences
 

@@ -13,6 +13,7 @@ pub mod dispatch;
 pub mod methods;
 pub mod server;
 
+mod chunk;
 mod raw;
 
 mod reaper;

@@ -22,10 +22,18 @@ struct FakeBridge {
 
 impl FakeBridge {
     fn start(name: &str) -> FakeBridge {
-        Self::start_with(name, |_| {})
+        Self::start_held(name, true, |_| {})
     }
 
     fn start_with(name: &str, setup: impl FnOnce(&mut FakeSession) + Send + 'static) -> FakeBridge {
+        Self::start_held(name, false, setup)
+    }
+
+    fn start_held(
+        name: &str,
+        held: bool,
+        setup: impl FnOnce(&mut FakeSession) + Send + 'static,
+    ) -> FakeBridge {
         let dir = std::env::temp_dir().join(format!("mort-cli-{}-{name}", std::process::id()));
         let socket = dir.join("bridge.sock");
         let stop = Arc::new(AtomicBool::new(false));
@@ -45,8 +53,9 @@ impl FakeBridge {
                     )))
                 });
                 d.register("test.echo", false, |_, p| Outcome::Value(Ok(p)));
-                d.set_held(true);
+                d.set_held(held);
                 mort_bridge::methods::register_reads(&mut d);
+                mort_bridge::methods::register_edits(&mut d);
                 let mut session = FakeSession::new();
                 setup(&mut session);
                 ready_tx.send(()).unwrap();
@@ -422,4 +431,155 @@ fn project_get_has_regions() {
     assert_eq!(v["project"]["name"], "untitled");
     assert_eq!(v["regions"][0]["name"], "verse");
     assert!(v["state"].is_u64());
+}
+
+fn ok(o: &Output) -> String {
+    assert_eq!(o.status.code(), Some(0), "stderr: {}", stderr(o));
+    stdout(o)
+}
+
+#[test]
+fn track_edits_and_undo() {
+    let b = FakeBridge::start_with("track-edits", band);
+    let t = ok(&b.mort(&["track", "add", "Lead", "--at", "1"]));
+    assert!(t.starts_with("added Lead at 1  {"), "{t}");
+    let t = ok(&b.mort(&["track", "add", "Snare", "--in", "drums"]));
+    assert!(t.starts_with("added Snare in Drums"), "{t}");
+    let t = ok(&b.mort(&[
+        "track", "set", "lead", "--volume", "-6", "--pan", "R35", "--solo", "on",
+    ]));
+    assert!(
+        t.starts_with("set Lead volume -6.0 dB, pan R35, solo on"),
+        "{t}"
+    );
+
+    let list = ok(&b.mort(&["tracks"]));
+    let lead = list.lines().find(|l| l.contains("Lead")).unwrap();
+    assert!(
+        lead.starts_with("1 ")
+            && lead.contains("-6.0 dB")
+            && lead.contains("R35")
+            && lead.contains('S'),
+        "{lead}"
+    );
+    assert!(list.contains("    Snare"), "snare is inside drums: {list}");
+
+    let t = ok(&b.mort(&["undo"]));
+    assert!(
+        t.starts_with("undid mort: Lead volume -6.0 dB, pan R35, solo on"),
+        "{t}"
+    );
+    ok(&b.mort(&["redo"]));
+    let t = ok(&b.mort(&["track", "rm", "lead"]));
+    assert!(t.starts_with("removed Lead"), "{t}");
+    assert!(!ok(&b.mort(&["tracks"])).contains("Lead"));
+
+    let o = b.mort(&["track", "set", "bass"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).contains("say what to change"));
+}
+
+#[test]
+fn fx_edits() {
+    let b = FakeBridge::start_with("fx-edits", band);
+    let t = ok(&b.mort(&["fx", "add", "verb", "ReaComp"]));
+    assert!(
+        t.starts_with("added VST: ReaComp (Cockos) to Verb at 1"),
+        "{t}"
+    );
+    ok(&b.mort(&["fx", "add", "verb", "ReaEQ", "--at", "1"]));
+    let t = ok(&b.mort(&["fx", "verb"]));
+    assert!(
+        t.contains("1  VST: ReaEQ") && t.contains("2  VST: ReaComp"),
+        "{t}"
+    );
+    ok(&b.mort(&["fx", "move", "verb", "comp", "1"]));
+    ok(&b.mort(&["fx", "bypass", "verb", "eq"]));
+    let t = ok(&b.mort(&["fx", "verb"]));
+    let eq = t
+        .lines()
+        .find(|l| l.contains("2  VST: ReaEQ"))
+        .unwrap_or_default();
+    assert!(
+        t.contains("1  VST: ReaComp") && eq.contains("bypassed"),
+        "{t}"
+    );
+    ok(&b.mort(&["fx", "enable", "verb", "eq"]));
+    let t = ok(&b.mort(&["fx", "preset", "verb", "eq", "Mud cut"]));
+    assert!(
+        t.starts_with("loaded VST: ReaEQ (Cockos) on Verb: preset Mud cut"),
+        "{t}"
+    );
+    let t = ok(&b.mort(&["params", "verb", "eq", "gain"]));
+    assert!(t.contains("-3.00 dB"), "{t}");
+    ok(&b.mort(&["fx", "rm", "verb", "comp"]));
+    assert!(!ok(&b.mort(&["fx", "verb"])).contains("ReaComp"));
+
+    let o = b.mort(&["fx", "add", "verb", "Serum"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("no such plugin (Serum)"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn set_params_by_text_and_value() {
+    let b = FakeBridge::start_with("set", band);
+    let t = ok(&b.mort(&["set", "bass", "eq", "gain", "-3 dB"]));
+    assert!(t.contains("Gain-Band 1 = -3.00 dB"), "{t}");
+    let t = ok(&b.mort(&["set", "bass", "eq", "freq", "2.4k"]));
+    assert!(t.contains("Freq-Band 1 = 2400 Hz"), "{t}");
+    let t = ok(&b.mort(&["set", "bass", "eq", "2", "0.25", "--normalised"]));
+    assert!(t.contains("Q-Band 1") && t.contains("(0.2500)"), "{t}");
+    let o = b.mort(&["set", "bass", "eq", "gain", "+40 dB"]);
+    assert_eq!(o.status.code(), Some(1));
+    let e = stderr(&o);
+    assert!(e.contains("runs from `-24.00 dB` to `24.00 dB`"), "{e}");
+}
+
+#[test]
+fn edits_check_state_and_hold() {
+    let b = FakeBridge::start_with("stale", band);
+    let o = b.mort(&["call", "track.add", r#"{"name": "x", "expect_state": 1}"#]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(stderr(&o).starts_with("mort: stale:"), "{}", stderr(&o));
+
+    let held = FakeBridge::start_held("held", true, band);
+    let o = held.mort(&["track", "add", "x"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("busy: edits are held"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(
+        ok(&held.mort(&["tracks"])).contains("Bass"),
+        "reads still work"
+    );
+}
+
+#[test]
+fn undo_only_undoes_mort() {
+    let b = FakeBridge::start_with("undo", |s| {
+        use mort_session::{NewTrack, Session};
+        band(s);
+        s.begin_undo();
+        s.add_track(NewTrack {
+            name: "Theirs".into(),
+            ..NewTrack::default()
+        })
+        .unwrap();
+        s.end_undo("Add track");
+    });
+    let o = b.mort(&["undo"]);
+    assert_eq!(o.status.code(), Some(1));
+    let e = stderr(&o);
+    assert!(
+        e.contains("the next undo is not mort's: `Add track`")
+            && e.contains("undo this one in REAPER"),
+        "{e}"
+    );
+    assert!(ok(&b.mort(&["tracks"])).contains("Theirs"));
 }

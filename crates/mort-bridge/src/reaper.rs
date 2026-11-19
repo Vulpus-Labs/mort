@@ -19,8 +19,11 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use reaper_low::{PluginContext, PluginDestroyHook, register_plugin_destroy_hook};
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use reaper_medium::{
-    PositionInQuarterNotes, PositionInSeconds, ProjectContext, Reaper, ReaperSession, UndoScope,
+    CommandId, HookCommand, OwnedGaccelRegister, PositionInQuarterNotes, PositionInSeconds,
+    ProjectContext, Reaper, ReaperSession, ToggleAction, ToggleActionResult, UndoScope,
 };
 
 use mort_proto::model::SendInfo;
@@ -31,11 +34,11 @@ use mort_proto::model::{
 use mort_proto::{
     EnvelopeId, ErrorKind, ErrorObject, FxId, Guid, ItemId, TakeId, TempoMap, TrackId,
 };
-use mort_session::{NewTrack, Result, SendChange, Session, TrackChange, not_found};
+use mort_session::{NewTrack, Result, SendChange, Session, TrackChange, invalid, not_found};
 use reaper_low::raw::MediaTrack;
 use std::os::raw::c_int;
 
-use crate::raw;
+use crate::{chunk, raw};
 
 use crate::dispatch::{BUILD, Dispatcher};
 use crate::server::{Server, socket_dir};
@@ -88,6 +91,14 @@ fn plugin_main(context: PluginContext) -> std::result::Result<(), Box<dyn Error>
 
 fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> {
     session.plugin_register_add_timer(tick)?;
+    let hold = session.plugin_register_add_command_id("MORT_HOLD_EDITS")?;
+    HOLD_COMMAND.store(hold.get(), Ordering::Relaxed);
+    session.plugin_register_add_gaccel(OwnedGaccelRegister::without_key_binding(
+        hold,
+        "mort: hold edits",
+    ))?;
+    session.plugin_register_add_hook_command::<HoldEdits>()?;
+    session.plugin_register_add_toggle_action::<HoldEdits>()?;
     let (tx, rx) = mpsc::channel();
     let server = Server::start(&socket_dir(), &std::process::id().to_string(), tx)?;
     log(&format!(
@@ -104,12 +115,54 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
             dispatcher: {
                 let mut d = Dispatcher::new(rx);
                 crate::methods::register_reads(&mut d);
+                crate::methods::register_edits(&mut d);
                 d
             },
             _server: server,
         });
     });
     Ok(())
+}
+
+/// The command id REAPER gave *mort: hold edits*.
+static HOLD_COMMAND: AtomicU32 = AtomicU32::new(0);
+
+/// *mort: hold edits*: a toggle action that makes the bridge refuse edits
+/// (ADR 0004 §4).
+struct HoldEdits;
+
+fn with_dispatcher<R>(f: impl FnOnce(&mut Dispatcher<Live>) -> R) -> Option<R> {
+    BRIDGE.with(|b| {
+        b.try_borrow_mut()
+            .ok()
+            .and_then(|mut b| b.as_mut().map(|br| f(&mut br.dispatcher)))
+    })
+}
+
+impl HookCommand for HoldEdits {
+    fn call(command_id: CommandId, _flag: i32) -> bool {
+        if command_id.get() != HOLD_COMMAND.load(Ordering::Relaxed) {
+            return false;
+        }
+        with_dispatcher(|d| {
+            let held = !d.held();
+            d.set_held(held);
+            log(if held { "edits held" } else { "edits released" });
+        });
+        true
+    }
+}
+
+impl ToggleAction for HoldEdits {
+    fn call(command_id: CommandId) -> ToggleActionResult {
+        if command_id.get() != HOLD_COMMAND.load(Ordering::Relaxed) {
+            return ToggleActionResult::NotRelevant;
+        }
+        match with_dispatcher(|d| d.held()) {
+            Some(true) => ToggleActionResult::On,
+            _ => ToggleActionResult::Off,
+        }
+    }
 }
 
 extern "C" fn tick() {
@@ -190,6 +243,82 @@ impl Live {
         }
     }
 
+    /// Adds a track as the last child of folder `p`, making `p` a folder if
+    /// it is not one, and keeps every other track's nesting as it was.
+    fn insert_in_folder(&self, p: *mut MediaTrack) -> *mut MediaTrack {
+        let r = self.low();
+        let all = raw::tracks(r);
+        let pi = all.iter().position(|t| *t == p).expect("p is a track");
+        let base = raw::track_depth(r, p);
+        // The last track inside p, if any: the run of deeper tracks after it.
+        let last = all[pi + 1..]
+            .iter()
+            .take_while(|t| raw::track_depth(r, **t) > base)
+            .last()
+            .copied();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "folder depths are small integers"
+        )]
+        let depth = |t| raw::track_value(r, t, "I_FOLDERDEPTH") as c_int;
+        let (after, closing) = match last {
+            None => {
+                // p becomes a folder; the new track closes it and whatever p closed.
+                let d = depth(p);
+                raw::set_track_value(r, p, "I_FOLDERDEPTH", 1.0);
+                (pi, d - 1)
+            }
+            Some(l) => {
+                // l closes its own levels down to p's children; the new track
+                // closes the rest.
+                let li = all.iter().position(|t| *t == l).expect("l is a track");
+                let level = raw::track_depth(r, l);
+                let keep = -(level - base - 1);
+                let d = depth(l);
+                raw::set_track_value(r, l, "I_FOLDERDEPTH", f64::from(keep));
+                (li, d - keep)
+            }
+        };
+        let idx = c_int::try_from(after + 1).unwrap_or(c_int::MAX);
+        let t = raw::insert_track(r, idx);
+        raw::set_track_value(r, t, "I_FOLDERDEPTH", f64::from(closing));
+        t
+    }
+
+    /// Moves `t`'s folder-depth change onto its neighbours before it is
+    /// deleted, because REAPER's `DeleteTrack` leaves depths as they were.
+    /// Every other track keeps its level, except the children of a deleted
+    /// folder, which move up one level (as in the fake).
+    fn unlink_from_folders(&self, t: *mut MediaTrack) {
+        let r = self.low();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "folder depths are small integers"
+        )]
+        let depth = |t| raw::track_value(r, t, "I_FOLDERDEPTH") as c_int;
+        let all = raw::tracks(r);
+        let Some(i) = all.iter().position(|x| *x == t) else {
+            return;
+        };
+        let d = depth(t);
+        if d > 0 {
+            // A folder: the track that closes it now closes one level fewer.
+            let base = raw::track_depth(r, t);
+            let closer = all[i + 1..]
+                .iter()
+                .take_while(|x| raw::track_depth(r, **x) > base)
+                .last()
+                .copied();
+            if let Some(c) = closer {
+                raw::set_track_value(r, c, "I_FOLDERDEPTH", f64::from(depth(c) + 1));
+            }
+        } else if d < 0 && i > 0 {
+            // It closed folders: the track before it closes them instead.
+            let prev = all[i - 1];
+            raw::set_track_value(r, prev, "I_FOLDERDEPTH", f64::from(depth(prev) + d));
+        }
+    }
+
     fn track_info(&self, t: *mut MediaTrack) -> TrackInfo {
         let r = self.low();
         let number = raw::track_value(r, t, "IP_TRACKNUMBER");
@@ -237,6 +366,40 @@ fn later(ticket: &str) -> ErrorObject {
         None,
         format!("ticket {ticket} adds it"),
     )
+}
+
+fn reaper_failed(call: &str, subject: &impl ToString) -> ErrorObject {
+    ErrorObject::new(
+        ErrorKind::Reaper,
+        format!("REAPER failed at {call}"),
+        Some(subject.to_string()),
+        "check the element in REAPER and try again; report it if it keeps failing",
+    )
+}
+
+/// The largest linear gain REAPER's faders allow: +12 dB.
+const MAX_GAIN: f64 = 3.981_071_705_534_973;
+
+fn check_gain(v: Option<f64>, subject: &impl ToString) -> Result<()> {
+    match v {
+        Some(v) if !(0.0..=MAX_GAIN).contains(&v) => Err(invalid(
+            format!("volume {v} is outside 0 to +12 dB"),
+            Some(subject.to_string()),
+            "give a linear gain from 0 to 3.98",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn check_pan(p: Option<f64>, subject: &impl ToString) -> Result<()> {
+    match p {
+        Some(p) if !(-1.0..=1.0).contains(&p) => Err(invalid(
+            format!("pan {p} is outside −1 to 1"),
+            Some(subject.to_string()),
+            "give a pan from −1 (left) to 1 (right)",
+        )),
+        _ => Ok(()),
+    }
 }
 
 impl TempoMap for Live {
@@ -311,6 +474,8 @@ impl Session for Live {
             path: raw::project_path(self.low()),
             sample_rate: rate,
             length,
+            // SAFETY: a null project means the current one.
+            dirty: unsafe { self.low().IsProjectDirty(std::ptr::null_mut()) } != 0,
         }
     }
 
@@ -349,44 +514,199 @@ impl Session for Live {
         self.find_track(id).map(|t| self.track_info(t))
     }
 
-    fn add_track(&mut self, _: NewTrack) -> Result<TrackId> {
-        Err(later("0006"))
+    fn add_track(&mut self, spec: NewTrack) -> Result<TrackId> {
+        let r = self.low();
+        let count = c_int::try_from(raw::tracks(r).len()).unwrap_or(c_int::MAX);
+        let t =
+            match spec.parent {
+                None => {
+                    let idx =
+                        match spec.index {
+                            None => count,
+                            Some(i) => c_int::try_from(i).ok().filter(|i| *i <= count).ok_or_else(
+                                || {
+                                    invalid(
+                                        format!("track index {i} is past the end ({count})"),
+                                        None,
+                                        "leave the index out to add at the end",
+                                    )
+                                },
+                            )?,
+                        };
+                    let t = raw::insert_track(r, idx);
+                    // A track inserted inside a folder's range joins the folder;
+                    // at the top level it must not close anything.
+                    if raw::track_value(r, t, "I_FOLDERDEPTH") != 0.0 {
+                        raw::set_track_value(r, t, "I_FOLDERDEPTH", 0.0);
+                    }
+                    t
+                }
+                Some(parent) => {
+                    if spec.index.is_some() {
+                        return Err(invalid(
+                            "a track added to a folder goes at the folder's end",
+                            None,
+                            "give a parent or an index, not both",
+                        ));
+                    }
+                    let p = self.find_track(parent)?;
+                    if p == raw::master(r) {
+                        return Err(invalid(
+                            "the master is not a folder",
+                            Some(parent.to_string()),
+                            "leave the parent out to add a top-level track",
+                        ));
+                    }
+                    self.insert_in_folder(p)
+                }
+            };
+        raw::set_track_string(r, t, "P_NAME", &spec.name);
+        Ok(TrackId(raw::track_guid(r, t)))
     }
 
-    fn remove_track(&mut self, _: TrackId) -> Result<()> {
-        Err(later("0006"))
+    fn remove_track(&mut self, id: TrackId) -> Result<()> {
+        let t = self.find_track(id)?;
+        if t == raw::master(self.low()) {
+            return Err(invalid(
+                "the master cannot be removed",
+                Some(id.to_string()),
+                "remove other tracks instead",
+            ));
+        }
+        self.unlink_from_folders(t);
+        raw::delete_track(self.low(), t);
+        Ok(())
     }
 
-    fn set_track(&mut self, _: TrackId, _: &TrackChange) -> Result<()> {
-        Err(later("0006"))
+    fn set_track(&mut self, id: TrackId, change: &TrackChange) -> Result<()> {
+        let t = self.find_track(id)?;
+        check_gain(change.volume, &id)?;
+        check_pan(change.pan, &id)?;
+        let r = self.low();
+        if let Some(n) = &change.name {
+            raw::set_track_string(r, t, "P_NAME", n);
+        }
+        if let Some(v) = change.volume {
+            raw::set_track_value(r, t, "D_VOL", v);
+        }
+        if let Some(p) = change.pan {
+            raw::set_track_value(r, t, "D_PAN", p);
+        }
+        if let Some(m) = change.mute {
+            raw::set_track_value(r, t, "B_MUTE", f64::from(u8::from(m)));
+        }
+        if let Some(on) = change.solo {
+            raw::set_track_value(r, t, "I_SOLO", if on { 2.0 } else { 0.0 });
+        }
+        Ok(())
     }
 
-    fn add_send(&mut self, _: TrackId, _: TrackId) -> Result<usize> {
-        Err(later("0006"))
+    fn add_send(&mut self, from: TrackId, to: TrackId) -> Result<usize> {
+        let (f, t) = (self.find_track(from)?, self.find_track(to)?);
+        if f == t {
+            return Err(invalid(
+                "a track cannot send to itself",
+                Some(from.to_string()),
+                "choose another destination",
+            ));
+        }
+        let i = raw::create_send(self.low(), f, t);
+        usize::try_from(i).map_err(|_| reaper_failed("CreateTrackSend", &from))
     }
 
-    fn set_send(&mut self, _: TrackId, _: usize, _: &SendChange) -> Result<()> {
-        Err(later("0006"))
+    fn set_send(&mut self, from: TrackId, send: usize, change: &SendChange) -> Result<()> {
+        let t = self.find_track(from)?;
+        let r = self.low();
+        let i = c_int::try_from(send)
+            .ok()
+            .filter(|i| *i < raw::send_count(r, t))
+            .ok_or_else(|| {
+                not_found(
+                    "send",
+                    format!("{from} send {send}"),
+                    "list sends with `mort tracks`",
+                )
+            })?;
+        check_gain(change.volume, &from)?;
+        check_pan(change.pan, &from)?;
+        if let Some(v) = change.volume {
+            raw::set_send_value(r, t, i, "D_VOL", v);
+        }
+        if let Some(p) = change.pan {
+            raw::set_send_value(r, t, i, "D_PAN", p);
+        }
+        if let Some(m) = change.mute {
+            raw::set_send_value(r, t, i, "B_MUTE", f64::from(u8::from(m)));
+        }
+        Ok(())
     }
 
-    fn track_chunk(&self, _: TrackId) -> Result<String> {
-        Err(later("0012"))
+    fn track_chunk(&self, id: TrackId) -> Result<String> {
+        let t = self.find_track(id)?;
+        raw::track_chunk(self.low(), t).ok_or_else(|| reaper_failed("GetTrackStateChunk", &id))
     }
 
-    fn add_fx(&mut self, _: TrackId, _: &str, _: Option<usize>) -> Result<FxId> {
-        Err(later("0006"))
+    fn add_fx(&mut self, track: TrackId, plugin: &str, index: Option<usize>) -> Result<FxId> {
+        let t = self.find_track(track)?;
+        let r = self.low();
+        let len = raw::fx_count(r, t);
+        let index =
+            match index {
+                None => None,
+                Some(i) => Some(c_int::try_from(i).ok().filter(|i| *i <= len).ok_or_else(
+                    || {
+                        invalid(
+                            format!("FX index {i} is past the end of the chain ({len})"),
+                            Some(track.to_string()),
+                            "leave the index out to add at the end",
+                        )
+                    },
+                )?),
+            };
+        let i = raw::fx_add(r, t, plugin, index).ok_or_else(|| {
+            not_found(
+                "plugin",
+                plugin,
+                "use the name REAPER's FX browser shows, such as `ReaEQ` or `CLAP: mort probe`",
+            )
+        })?;
+        raw::fx_guid(r, t, i)
+            .map(FxId)
+            .ok_or_else(|| reaper_failed("TrackFX_GetFXGUID", &track))
     }
 
-    fn remove_fx(&mut self, _: FxId) -> Result<()> {
-        Err(later("0006"))
+    fn remove_fx(&mut self, id: FxId) -> Result<()> {
+        let (t, i) = self.find_fx(id)?;
+        if raw::fx_delete(self.low(), t, i) {
+            Ok(())
+        } else {
+            Err(reaper_failed("TrackFX_Delete", &id))
+        }
     }
 
-    fn move_fx(&mut self, _: FxId, _: usize) -> Result<()> {
-        Err(later("0006"))
+    fn move_fx(&mut self, id: FxId, index: usize) -> Result<()> {
+        let (t, i) = self.find_fx(id)?;
+        let len = raw::fx_count(self.low(), t);
+        let to = c_int::try_from(index)
+            .ok()
+            .filter(|to| *to < len)
+            .ok_or_else(|| {
+                invalid(
+                    format!("FX index {index} is past the end of the chain ({len})"),
+                    Some(id.to_string()),
+                    "give an index within the chain",
+                )
+            })?;
+        if to != i {
+            raw::fx_move(self.low(), t, i, to);
+        }
+        Ok(())
     }
 
-    fn set_fx_enabled(&mut self, _: FxId, _: bool) -> Result<()> {
-        Err(later("0006"))
+    fn set_fx_enabled(&mut self, id: FxId, enabled: bool) -> Result<()> {
+        let (t, i) = self.find_fx(id)?;
+        raw::fx_set_enabled(self.low(), t, i, enabled);
+        Ok(())
     }
 
     fn fx(&self, id: FxId) -> Result<(TrackId, FxInfo)> {
@@ -408,8 +728,21 @@ impl Session for Live {
             .collect())
     }
 
-    fn set_param(&mut self, _: FxId, _: u32, _: f64) -> Result<()> {
-        Err(later("0006"))
+    fn set_param(&mut self, id: FxId, index: u32, value: f64) -> Result<()> {
+        let (t, fx) = self.find_fx(id)?;
+        let p = self.param_index(t, fx, id, index)?;
+        if !(0.0..=1.0).contains(&value) {
+            return Err(invalid(
+                format!("parameter value {value} is outside 0–1"),
+                Some(format!("{id} #{index}")),
+                "give a normalised value from 0 to 1",
+            ));
+        }
+        if raw::param_set(self.low(), t, fx, p, value) {
+            Ok(())
+        } else {
+            Err(reaper_failed("TrackFX_SetParamNormalized", &id))
+        }
     }
 
     fn format_param(&self, id: FxId, index: u32, value: f64) -> Result<Option<String>> {
@@ -424,16 +757,52 @@ impl Session for Live {
         ))
     }
 
-    fn fx_state(&self, _: FxId) -> Result<String> {
-        Err(later("0006"))
+    fn fx_state(&self, id: FxId) -> Result<String> {
+        let (t, _) = self.find_fx(id)?;
+        let tid = TrackId(raw::track_guid(self.low(), t));
+        let c = raw::track_chunk(self.low(), t)
+            .ok_or_else(|| reaper_failed("GetTrackStateChunk", &tid))?;
+        chunk::fx_state(&c, &id.to_string())
+            .ok_or_else(|| reaper_failed("finding the FX in its track chunk", &id))
     }
 
-    fn set_fx_state(&mut self, _: FxId, _: &str) -> Result<()> {
-        Err(later("0006"))
+    fn set_fx_state(&mut self, id: FxId, state: &str) -> Result<()> {
+        let (t, _) = self.find_fx(id)?;
+        let tid = TrackId(raw::track_guid(self.low(), t));
+        let c = raw::track_chunk(self.low(), t)
+            .ok_or_else(|| reaper_failed("GetTrackStateChunk", &tid))?;
+        let new = chunk::replace_fx_state(&c, &id.to_string(), state).map_err(|e| match e {
+            chunk::ReplaceError::NotFound => {
+                reaper_failed("finding the FX in its track chunk", &id)
+            }
+            chunk::ReplaceError::WrongKind { have, given } => invalid(
+                format!("the state is a `{given}` block but the FX is `{have}`"),
+                Some(id.to_string()),
+                "pass state read from this FX with `fx.state`",
+            ),
+        })?;
+        if raw::set_track_chunk(self.low(), t, &new) {
+            Ok(())
+        } else {
+            Err(invalid(
+                "REAPER rejected the state",
+                Some(id.to_string()),
+                "pass state read from this FX with `fx.state`",
+            ))
+        }
     }
 
-    fn load_preset(&mut self, _: FxId, _: &str) -> Result<()> {
-        Err(later("0006"))
+    fn load_preset(&mut self, id: FxId, preset: &str) -> Result<()> {
+        let (t, i) = self.find_fx(id)?;
+        if raw::fx_set_preset(self.low(), t, i, preset) {
+            Ok(())
+        } else {
+            Err(not_found(
+                "preset",
+                preset,
+                "use a name from the preset menu in the FX's window",
+            ))
+        }
     }
 
     fn envelope(&mut self, _: EnvelopeTarget, _: bool) -> Result<Option<EnvelopeInfo>> {
@@ -496,6 +865,25 @@ impl Session for Live {
         Err(later("0008"))
     }
 
+    fn save_project(&mut self, path: Option<&str>) -> Result<()> {
+        if path.is_none() && raw::project_path(self.low()).is_none() {
+            return Err(invalid(
+                "the project has never been saved",
+                None,
+                "give a path to save it to",
+            ));
+        }
+        if path.is_some_and(|p| p.contains('\0')) {
+            return Err(invalid(
+                "the path contains a NUL byte",
+                None,
+                "give a plain path",
+            ));
+        }
+        raw::save_project(self.low(), path);
+        Ok(())
+    }
+
     fn begin_undo(&mut self) {
         self.reaper.undo_begin_block_2(PROJ);
     }
@@ -506,6 +894,10 @@ impl Session for Live {
 
     fn undo_label(&self) -> Option<String> {
         self.reaper.undo_can_undo_2(PROJ, |s| s.to_str().to_owned())
+    }
+
+    fn redo_label(&self) -> Option<String> {
+        raw::redo_label(self.low())
     }
 
     fn undo(&mut self) -> Option<String> {
