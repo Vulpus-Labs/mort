@@ -415,6 +415,74 @@ pub fn set_track_chunk(r: &Reaper, t: *mut MediaTrack, chunk: &str) -> bool {
     unsafe { r.SetTrackStateChunk(t, c.as_ptr(), false) }
 }
 
+/// A numeric project setting, such as `RENDER_STARTPOS`.
+pub fn project_info(r: &Reaper, name: &str) -> f64 {
+    let n = cstr(name);
+    // SAFETY: main thread, current project.
+    unsafe { r.GetSetProjectInfo(null_mut(), n.as_ptr(), 0.0, false) }
+}
+
+/// Sets a numeric project setting.
+pub fn set_project_info(r: &Reaper, name: &str, v: f64) {
+    let n = cstr(name);
+    // SAFETY: main thread, current project.
+    unsafe {
+        r.GetSetProjectInfo(null_mut(), n.as_ptr(), v, true);
+    }
+}
+
+/// Runs a main-section action on the current project.
+pub fn run_action(r: &Reaper, command: c_int) {
+    // SAFETY: main thread, current project.
+    unsafe { r.Main_OnCommandEx(command, 0, null_mut()) }
+}
+
+/// Moves the edit cursor without moving the view or seeking playback.
+pub fn set_cursor(r: &Reaper, t: f64) {
+    // SAFETY: main thread, current project.
+    unsafe { r.SetEditCurPos2(null_mut(), t, false, false) }
+}
+
+/// Starts playback from the edit cursor.
+pub fn play(r: &Reaper) {
+    // SAFETY: main thread, current project.
+    unsafe { r.OnPlayButtonEx(null_mut()) }
+}
+
+/// The position audio is being played at.
+pub fn play_position(r: &Reaper) -> f64 {
+    // SAFETY: main thread, current project.
+    unsafe { r.GetPlayPosition2Ex(null_mut()) }
+}
+
+/// Actions in the main section whose names contain `text`, ignoring case.
+pub fn find_actions(r: &Reaper, text: &str, limit: usize) -> Vec<(c_int, String)> {
+    let want = text.to_lowercase();
+    let mut out = Vec::new();
+    // SAFETY: main thread; a null section is the main section; REAPER owns
+    // the name strings, which are read at once.
+    unsafe {
+        for idx in 0.. {
+            let mut name: *const c_char = std::ptr::null();
+            let id = r.kbd_enumerateActions(null_mut(), idx, &raw mut name);
+            if id == 0 {
+                break;
+            }
+            if name.is_null() {
+                continue;
+            }
+            let n = CStr::from_ptr(name).to_string_lossy();
+            if n.to_lowercase().contains(&want) {
+                out.push((id, n.into_owned()));
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Saves the current project to its file, or as a copy at `path`.
 pub fn save_project(r: &Reaper, path: Option<&str>) {
     // SAFETY: main thread, current project.

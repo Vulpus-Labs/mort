@@ -118,6 +118,7 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
                 crate::methods::register_edits(&mut d);
                 crate::methods::register_automation(&mut d);
                 crate::methods::register_midi(&mut d);
+                crate::methods::register_transport(&mut d);
                 d
             },
             _server: server,
@@ -383,15 +384,6 @@ impl Live {
     }
 }
 
-fn later(ticket: &str) -> ErrorObject {
-    ErrorObject::new(
-        ErrorKind::Reaper,
-        "the bridge does not do this yet",
-        None,
-        format!("ticket {ticket} adds it"),
-    )
-}
-
 fn reaper_failed(call: &str, subject: &impl ToString) -> ErrorObject {
     ErrorObject::new(
         ErrorKind::Reaper,
@@ -400,6 +392,20 @@ fn reaper_failed(call: &str, subject: &impl ToString) -> ErrorObject {
         "check the element in REAPER and try again; report it if it keeps failing",
     )
 }
+
+/// REAPER's *File: Dry run render project, using the most recent render
+/// settings* (found with `actions.find`, REAPER 7.67).
+const DRY_RUN_RENDER: c_int = 43349;
+
+/// The project render settings mort changes for a dry run, and restores.
+const RENDER_SETTINGS: [&str; 6] = [
+    "RENDER_BOUNDSFLAG",
+    "RENDER_STARTPOS",
+    "RENDER_ENDPOS",
+    "RENDER_SETTINGS",
+    "RENDER_TAILFLAG",
+    "RENDER_ADDTOPROJ",
+];
 
 /// How far, in seconds, an event may lie outside its item and still be
 /// written, allowing for rounding through REAPER's ticks.
@@ -1278,6 +1284,10 @@ impl Session for Live {
         Ok(())
     }
 
+    fn find_actions(&self, text: &str, limit: usize) -> Vec<(i32, String)> {
+        raw::find_actions(self.low(), text, limit)
+    }
+
     fn save_project(&mut self, path: Option<&str>) -> Result<()> {
         if path.is_none() && raw::project_path(self.low()).is_none() {
             return Err(invalid(
@@ -1325,8 +1335,47 @@ impl Session for Live {
         self.reaper.undo_do_redo_2(PROJ).then_some(label)
     }
 
-    fn play(&mut self, _: f64, _: f64) -> Result<()> {
-        Err(later("0009"))
+    fn play(&mut self, start: f64, end: f64) -> Result<()> {
+        if end <= start {
+            return Err(invalid(
+                format!("range {start}..{end} is empty"),
+                None,
+                "give an end after the start",
+            ));
+        }
+        let r = self.low();
+        self.reaper.on_stop_button_ex(PROJ);
+        raw::set_cursor(r, start);
+        raw::play(r);
+        Ok(())
+    }
+
+    fn render(&mut self, start: f64, end: f64) -> Result<()> {
+        if end <= start {
+            return Err(invalid(
+                format!("range {start}..{end} is empty"),
+                None,
+                "give an end after the start",
+            ));
+        }
+        let r = self.low();
+        // The project's render settings are borrowed for the dry run and
+        // put back afterwards.
+        let saved: Vec<(&str, f64)> = RENDER_SETTINGS
+            .iter()
+            .map(|k| (*k, raw::project_info(r, k)))
+            .collect();
+        raw::set_project_info(r, "RENDER_BOUNDSFLAG", 0.0); // custom time bounds
+        raw::set_project_info(r, "RENDER_STARTPOS", start);
+        raw::set_project_info(r, "RENDER_ENDPOS", end);
+        raw::set_project_info(r, "RENDER_SETTINGS", 0.0); // master mix
+        raw::set_project_info(r, "RENDER_TAILFLAG", 0.0); // no tail
+        raw::set_project_info(r, "RENDER_ADDTOPROJ", 0.0);
+        raw::run_action(r, DRY_RUN_RENDER);
+        for (k, v) in saved {
+            raw::set_project_info(r, k, v);
+        }
+        Ok(())
     }
 
     fn stop(&mut self) {
@@ -1338,6 +1387,6 @@ impl Session for Live {
     }
 
     fn position(&self) -> f64 {
-        self.reaper.get_play_position_ex(PROJ).into_inner()
+        raw::play_position(self.low())
     }
 }

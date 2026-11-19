@@ -11,6 +11,7 @@ mod midi;
 mod resolve;
 mod show;
 mod smf;
+mod transport;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -93,6 +94,15 @@ enum Command {
 
     /// List or write MIDI notes and CCs.
     Midi(midi::Midi),
+
+    /// Play a range through the monitors, stopping at its end.
+    Play(transport::RangeJob),
+
+    /// Render a range faster than real time, without writing a file.
+    Render(transport::RangeJob),
+
+    /// Stop playback.
+    Stop,
 
     /// Undo mort's last edit. Refuses if the last edit was not mort's.
     Undo,
@@ -254,6 +264,9 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
         } => Err(Outcome::Usage("name a track: `mort fx <track>`".into())),
         Command::Automate(a) => edited(cli, |c| automation::run(c, a)),
         Command::Midi(m) => edited(cli, |c| midi::run(c, m)),
+        Command::Play(a) => edited(cli, |c| transport::run(c, a, false)),
+        Command::Render(a) => edited(cli, |c| transport::run(c, a, true)),
+        Command::Stop => edited(cli, transport::stop),
         Command::Undo => edited(cli, |c| edits::undo(c, false)),
         Command::Redo => edited(cli, |c| edits::undo(c, true)),
         Command::Fx {

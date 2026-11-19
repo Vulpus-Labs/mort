@@ -318,6 +318,10 @@ pub trait Session {
     /// `invalid` if the project has never been saved and no path is given.
     fn save_project(&mut self, path: Option<&str>) -> Result<()>;
 
+    /// REAPER actions in the main section whose names contain `text`
+    /// (ignoring case), as (command id, name), at most `limit` of them.
+    fn find_actions(&self, text: &str, limit: usize) -> Vec<(i32, String)>;
+
     // --- Undo ------------------------------------------------------------
 
     /// Starts an undo block. Every change until [`Session::end_undo`] is
@@ -348,6 +352,17 @@ pub trait Session {
     ///
     /// `invalid` if `end` is not after `start`.
     fn play(&mut self, start: f64, end: f64) -> Result<()>;
+
+    /// Renders `start` to `end` faster than real time, through every
+    /// track's FX, without writing a file (REAPER's dry-run render). It
+    /// returns when the render is done. The project's own render settings
+    /// are left as they were.
+    ///
+    /// # Errors
+    ///
+    /// `invalid` if `end` is not after `start`; `reaper` if REAPER cannot
+    /// render.
+    fn render(&mut self, start: f64, end: f64) -> Result<()>;
 
     /// Stops playback.
     fn stop(&mut self);

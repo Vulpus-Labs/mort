@@ -29,9 +29,11 @@ longer match the project are worse than none.
    Every query result says which of its parts are stale. `mort measure
    --stale` re-measures only stale ranges and tracks.
 4. **Running a measurement:**
-   - `render` mode renders the range faster than real time, with a dry run
-     if REAPER's API allows it, and otherwise to a scratch file in
-     `$TMPDIR/mort/renders` that is deleted afterwards. It is the default.
+   - `render` mode renders the range faster than real time as a dry run:
+     REAPER's action *File: Dry run render project, using the most recent
+     render settings* (43349), with the project's `RENDER_*` settings
+     borrowed for the range and master mix and then put back. No file is
+     written. It is the default.
    - `play` mode plays the range through the person's monitors in real
      time, for when the person wants to listen too.
 5. **Persistence.** Captures are saved in a sidecar directory next to the

@@ -282,6 +282,36 @@ got = call("midi.read", {"track": bass_id})["result"]["items"]
 check("undo midi", r.get("result", {}).get("label") == "mort: smoke midi replace"
       and [x["pitch"] for x in got[0]["notes"]] == [36, 43], f"{r.get('result') or r.get('error')} {got[0]['notes']}")
 
+# --- Transport and renders (ticket 0009) ----------------------------------
+import time as _time
+
+def wait_job(job, seconds=120):
+    r = call("job.wait", {"id": job, "timeout_ms": seconds * 1000})
+    return r.get("result", {})
+
+state_before = call("bridge.status")["result"]["state"]
+r = call("render", {"start": 0.0, "end": 8.0})
+done = wait_job(r["result"]["job"])
+alive = "result" in call("bridge.status")
+check("dry-run render", done.get("state") == "done" and alive,
+      f'{done.get("state")} in {done.get("result", {}).get("seconds", 0):.2f}s, '
+      f'{done.get("result", {}).get("speed", 0):.0f}x; bridge answers after: {alive}')
+
+r = call("play", {"start": 1.0, "end": 2.0})
+t0 = _time.time()
+done = wait_job(r["result"]["job"])
+res = done.get("result", {})
+check("play stops at the end", done.get("state") == "done" and not res.get("stopped_early")
+      and 2.0 <= res.get("stopped_at", 0) < 2.3 and 0.8 < _time.time() - t0 < 3,
+      f'{done.get("state")} stopped at {res.get("stopped_at")} after {_time.time() - t0:.2f}s')
+
+r = call("play", {"start": 0.0, "end": 60.0})
+job = r["result"]["job"]
+_time.sleep(0.5)
+call("stop")
+done = wait_job(job)
+check("stop ends a play early", done.get("result", {}).get("stopped_early") is True, str(done.get("result")))
+
 check("every edit left an undo point", not no_undo_point, ", ".join(no_undo_point) or "all did")
 
 # Save the smoke project's copy so REAPER can quit without asking.

@@ -58,10 +58,15 @@ impl FakeBridge {
                 mort_bridge::methods::register_edits(&mut d);
                 mort_bridge::methods::register_automation(&mut d);
                 mort_bridge::methods::register_midi(&mut d);
+                mort_bridge::methods::register_transport(&mut d);
                 let mut session = FakeSession::new();
                 setup(&mut session);
                 ready_tx.send(()).unwrap();
+                let mut last = Instant::now();
                 while !stop.load(Ordering::SeqCst) {
+                    // Fake playback runs at fifty times real time.
+                    session.advance_by(last.elapsed().as_secs_f64() * 50.0);
+                    last = Instant::now();
                     d.tick(&mut session, Instant::now(), Duration::from_millis(8));
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -839,4 +844,57 @@ fn midi_follows_tempo_changes() {
         (3.5, 5.0)
     );
     assert_eq!(read["items"][0]["item"]["id"], item);
+}
+
+#[test]
+fn render_play_and_stop() {
+    let b = FakeBridge::start_with("transport", band);
+    let t = ok(&b.mort(&["render", "1.1..3.1"]));
+    assert!(t.starts_with("rendered 1.1..3.1 (4.00 s of audio"), "{t}");
+    let first: u64 = t
+        .split("run ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let t = ok(&b.mort(&["play", "1.1..2.1"]));
+    assert!(
+        t.starts_with(&format!("played 1.1..2.1, run {}", first + 1)),
+        "runs count up: {t}"
+    );
+
+    // A long play, stopped from outside: the job sees it stop early.
+    let t = ok(&b.mort(&["play", "1.1..200.1", "--no-wait"]));
+    let job = t
+        .split("job ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    assert!(ok(&b.mort(&["status"])).contains("playing  yes"));
+    let t = ok(&b.mort(&["stop"]));
+    assert!(t.starts_with("stopped at "), "{t}");
+    let v: Value = serde_json::from_str(&stdout(&b.mort(&[
+        "--json",
+        "call",
+        "job.wait",
+        &format!(r#"{{"id": {job}, "timeout_ms": 5000}}"#),
+    ])))
+    .unwrap();
+    assert_eq!(v["state"], "done");
+    assert_eq!(v["result"]["stopped_early"], true);
+
+    let o = b.mort(&["render", "3.1..1.1"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("the end must be after the start"),
+        "{}",
+        stderr(&o)
+    );
 }

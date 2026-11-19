@@ -109,6 +109,24 @@ impl Client {
     /// [`Failure::Bridge`] for an error reply; [`Failure::NoBridge`] if the
     /// bridge goes away or does not answer in time.
     pub fn call(&mut self, method: &str, params: Value) -> Result<Value, Failure> {
+        self.call_within(method, params, REPLY_TIMEOUT)
+    }
+
+    /// Calls a method, waiting up to `timeout` for the reply. Renders hold
+    /// REAPER's main thread, so waiting on a job needs longer than usual.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::call`].
+    pub fn call_within(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, Failure> {
+        self.writer
+            .set_read_timeout(Some(timeout))
+            .map_err(|e| Failure::Local(e.to_string()))?;
         let id = RequestId::Number(self.next);
         self.next += 1;
         let line = Message::Request(Request::new(id.clone(), method, params)).to_line();
@@ -131,7 +149,7 @@ impl Client {
                         "the bridge at {} did not answer `{method}` within {} s. REAPER runs \
                          mort only when it is idle: close any open dialog in REAPER and try again",
                         self.path.display(),
-                        REPLY_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     )));
                 }
                 Err(e) => return Err(self.lost(&e)),

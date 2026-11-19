@@ -11,7 +11,8 @@ use mort_proto::model::{ControlChange, EnvelopePoint, EnvelopeTarget, Note};
 use mort_proto::{ErrorObject, FxId, Position, Range, TrackId};
 use mort_session::Session;
 
-use crate::dispatch::{Ctx, Dispatcher, Outcome};
+use crate::dispatch::{Ctx, Dispatcher, Job, JobPoll, Outcome};
+use crate::runs;
 
 fn parse<T: DeserializeOwned>(method: &str, params: Value) -> Result<T, ErrorObject> {
     let params = if params.is_null() { json!({}) } else { params };
@@ -48,6 +49,13 @@ struct FxParams {
 }
 
 #[derive(Deserialize)]
+struct ActionsFind {
+    text: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct ConvertParams {
     #[serde(default)]
     to_seconds: Vec<String>,
@@ -76,6 +84,14 @@ pub fn register_reads<S: Session + 'static>(d: &mut Dispatcher<S>) {
     });
     read(d, "items.list", |s: &S, p: TrackParams| {
         Ok(json!({ "items": to_value(&s.items(p.track)?) }))
+    });
+    read(d, "actions.find", |s: &S, p: ActionsFind| {
+        let found: Vec<Value> = s
+            .find_actions(&p.text, p.limit.unwrap_or(50))
+            .into_iter()
+            .map(|(id, name)| json!({ "id": id, "name": name }))
+            .collect();
+        Ok(json!({ "actions": found }))
     });
     read(d, "time.convert", |s: &S, p: ConvertParams| {
         let map = s.tempo_map();
@@ -517,6 +533,129 @@ pub fn register_midi<S: Session + 'static>(d: &mut Dispatcher<S>) {
         }
         s.insert_midi(item, &p.notes, &p.ccs)?;
         Ok(json!({ "item": item, "created": created, "notes": p.notes.len(), "ccs": p.ccs.len() }))
+    });
+}
+
+// --- Transport and renders (ticket 0009) ------------------------------------
+
+#[derive(Deserialize)]
+struct RangeParams {
+    start: f64,
+    end: f64,
+}
+
+fn check_range(start: f64, end: f64) -> Result<(), ErrorObject> {
+    if end > start {
+        Ok(())
+    } else {
+        Err(mort_session::invalid(
+            format!("range {start}..{end} is empty"),
+            None,
+            "give an end after the start",
+        ))
+    }
+}
+
+/// Plays a range and stops at its end (ADR 0002 §3).
+struct PlayJob {
+    start: f64,
+    end: f64,
+    run: u64,
+}
+
+impl<S: Session> Job<S> for PlayJob {
+    fn start(&mut self, s: &mut S) -> Result<(), ErrorObject> {
+        self.run = runs::begin();
+        s.play(self.start, self.end)
+    }
+
+    fn poll(&mut self, s: &mut S) -> JobPoll {
+        let at = s.position();
+        let stopped = !s.is_playing();
+        if !stopped && at < self.end {
+            return JobPoll::Running(Some(json!({ "position": at })));
+        }
+        if !stopped {
+            s.stop();
+        }
+        runs::end(self.run);
+        JobPoll::Done(json!({
+            "run": self.run,
+            "start": self.start,
+            "end": self.end,
+            "stopped_at": at,
+            "stopped_early": stopped && at < self.end,
+        }))
+    }
+
+    fn cancel(&mut self, s: &mut S) {
+        s.stop();
+        runs::end(self.run);
+    }
+}
+
+/// Renders a range faster than real time (ADR 0006 §4).
+struct RenderJob {
+    start: f64,
+    end: f64,
+    run: u64,
+    seconds: f64,
+}
+
+impl<S: Session> Job<S> for RenderJob {
+    fn start(&mut self, s: &mut S) -> Result<(), ErrorObject> {
+        self.run = runs::begin();
+        let t = std::time::Instant::now();
+        // REAPER renders inside this call, holding the main thread.
+        let r = s.render(self.start, self.end);
+        self.seconds = t.elapsed().as_secs_f64();
+        runs::end(self.run);
+        r
+    }
+
+    fn poll(&mut self, _: &mut S) -> JobPoll {
+        JobPoll::Done(json!({
+            "run": self.run,
+            "start": self.start,
+            "end": self.end,
+            "seconds": self.seconds,
+            "speed": (self.end - self.start) / self.seconds.max(1e-9),
+        }))
+    }
+
+    fn cancel(&mut self, _: &mut S) {}
+}
+
+/// Registers `play`, `render` and `stop` (ticket 0009).
+pub fn register_transport<S: Session + 'static>(d: &mut Dispatcher<S>) {
+    d.register("play", false, |_, params| {
+        match parse::<RangeParams>("play", params)
+            .and_then(|p| check_range(p.start, p.end).map(|()| p))
+        {
+            Err(e) => Outcome::Value(Err(e)),
+            Ok(p) => Outcome::Job(Box::new(PlayJob {
+                start: p.start,
+                end: p.end,
+                run: 0,
+            })),
+        }
+    });
+    d.register("render", false, |_, params| {
+        match parse::<RangeParams>("render", params)
+            .and_then(|p| check_range(p.start, p.end).map(|()| p))
+        {
+            Err(e) => Outcome::Value(Err(e)),
+            Ok(p) => Outcome::Job(Box::new(RenderJob {
+                start: p.start,
+                end: p.end,
+                run: 0,
+                seconds: 0.0,
+            })),
+        }
+    });
+    d.register("stop", false, |ctx: &mut Ctx<'_, S>, _| {
+        ctx.session.stop();
+        Outcome::Value(Ok(json!({ "position": ctx.session.position() })))
     });
 }
 

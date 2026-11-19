@@ -404,6 +404,7 @@ impl<S: Session> Dispatcher<S> {
             "state": session.state(),
             "held": self.held,
             "playing": session.is_playing(),
+            "run": crate::runs::current(),
             "jobs": {
                 "running": self.running,
                 "queued": self.queue.len(),

@@ -235,6 +235,7 @@ pub struct FakeSession {
     position: f64,
     saved_to: Vec<String>,
     saved_state: u64,
+    renders: Vec<(f64, f64)>,
 }
 
 impl Default for FakeSession {
@@ -280,6 +281,7 @@ impl FakeSession {
             position: 0.0,
             saved_to: vec![],
             saved_state: 1,
+            renders: vec![],
         }
     }
 
@@ -287,6 +289,12 @@ impl FakeSession {
     pub fn set_tempo_map(&mut self, map: SteppedTempoMap) {
         self.tempo = map;
         self.changed();
+    }
+
+    /// The ranges `render` has been asked for, oldest first.
+    #[must_use]
+    pub fn renders(&self) -> &[(f64, f64)] {
+        &self.renders
     }
 
     /// The paths `save_project` has written to, oldest first.
@@ -314,6 +322,13 @@ impl FakeSession {
             .sort_by(|a, b| a.start.total_cmp(&b.start));
         self.changed();
         number
+    }
+
+    /// Moves the fake's transport on by `seconds` if it is playing.
+    pub fn advance_by(&mut self, seconds: f64) {
+        if self.playing.is_some() {
+            self.advance_to(self.position + seconds);
+        }
     }
 
     /// Lets the fake's transport reach `time`, stopping at the end of the
@@ -1049,6 +1064,22 @@ impl Session for FakeSession {
         Ok(())
     }
 
+    fn find_actions(&self, text: &str, limit: usize) -> Vec<(i32, String)> {
+        let t = text.to_lowercase();
+        [
+            (40044, "Transport: Play/stop"),
+            (
+                41824,
+                "File: Render project, using the most recent render settings",
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, n)| n.to_lowercase().contains(&t))
+        .take(limit)
+        .map(|(i, n)| (i, n.to_owned()))
+        .collect()
+    }
+
     fn save_project(&mut self, path: Option<&str>) -> Result<()> {
         match path {
             Some(p) => {
@@ -1107,6 +1138,12 @@ impl Session for FakeSession {
         check_range(start, end)?;
         self.playing = Some((start, end));
         self.position = start;
+        Ok(())
+    }
+
+    fn render(&mut self, start: f64, end: f64) -> Result<()> {
+        check_range(start, end)?;
+        self.renders.push((start, end));
         Ok(())
     }
 
