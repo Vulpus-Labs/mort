@@ -240,14 +240,33 @@ envs = call("envelopes.list", {"track": bass_id})["result"]["envelopes"]
 kinds = sorted(x["target"]["kind"] for x in envs)
 check("envelopes.list", kinds == ["pan", "param", "volume"], str(kinds))
 
-r, e = edit("automation.write", {"target": {"kind": "send_volume", "track": by["Kick"]["id"], "send": 0},
-                                 "points": [{"time": 0.0, "value": 1.0}]}, "smoke send env")
-check("send envelope creation refused clearly", e is not None and "send's volume envelope" in e["data"]["fix"], str(e))
-
 r = call("undo")
 pts = call("envelope.points", {"target": vol})["result"]["points"]
 check("undo automation", r.get("result", {}).get("label") == "mort: smoke clear" and len(pts) == 3,
       f"{r.get('result') or r.get('error')} {len(pts)} points")
+
+# Send envelopes (ticket 0016): Kick gets a second send to Verb, and only
+# that one gets a volume envelope, written into Verb's chunk.
+edit("send.add", {"from": by["Kick"]["id"], "to": by["Verb"]["id"]}, "smoke second send")
+edit("send.set", {"from": by["Kick"]["id"], "send": 1, "volume": 0.5}, "smoke second send level")
+_, before = tracks()
+send1 = {"kind": "send_volume", "track": by["Kick"]["id"], "send": 1}
+r, e = edit("automation.write", {"target": send1, "points": [{"time": 0.0, "value": 0.5}, {"time": 2.0, "value": 0.25}]},
+            "smoke send env")
+pts = call("envelope.points", {"target": send1}).get("result", {}).get("points", [])
+check("send envelope created and written", e is None and [(p["time"], round(p["value"], 3)) for p in pts] == [(0.0, 0.5), (2.0, 0.25)],
+      str(e or pts))
+envs = call("envelopes.list", {"track": by["Kick"]["id"]})["result"]["envelopes"]
+sends = [x["target"]["send"] for x in envs if x["target"]["kind"] == "send_volume"]
+check("only the second send has one", sends == [1], str(sends))
+_, after = tracks()
+check("both tracks otherwise unchanged", all(before[n] == after[n] for n in ("Kick", "Verb")),
+      json.dumps({n: [before[n], after[n]] for n in ("Kick", "Verb") if before[n] != after[n]}))
+r = call("undo")
+envs = call("envelopes.list", {"track": by["Kick"]["id"]})["result"]["envelopes"]
+check("one undo point removes it", r.get("result", {}).get("label") == "mort: smoke send env"
+      and not [x for x in envs if x["target"]["kind"] == "send_volume"],
+      f"{r.get('result') or r.get('error')} {envs}")
 
 # --- MIDI (ticket 0008) -----------------------------------------------------
 _, by = tracks()

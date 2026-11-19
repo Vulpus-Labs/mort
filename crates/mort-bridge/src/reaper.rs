@@ -536,9 +536,67 @@ impl Live {
                 raw::envelope_by_chunk_name(r, t, name).filter(|e| raw::envelopes(r, t).contains(e))
             }
             EnvLoc::Fx(fx, p) => raw::fx_envelope(r, t, fx, p, false),
+            // REAPER lists a send's envelope with the sending track's, though
+            // it lives in the receiving track's chunk (ticket 0016).
             EnvLoc::Send(i) => {
                 raw::send_envelope(r, t, i).filter(|e| raw::envelopes(r, t).contains(e))
             }
+        }
+    }
+
+    /// The track that send `send` on `t` goes to, and which of that
+    /// track's receives it is. A send and its receive are one object in
+    /// REAPER, so they answer `P_ENV` with the same pointer.
+    fn send_receive(&self, t: *mut MediaTrack, send: c_int) -> Option<(*mut MediaTrack, c_int)> {
+        let r = self.low();
+        let dest = raw::send_dest(r, t, send);
+        if dest.is_null() {
+            return None;
+        }
+        let env = raw::send_envelope(r, t, send)?;
+        (0..raw::receive_count(r, dest))
+            .find(|j| raw::receive_envelope(r, dest, *j) == Some(env))
+            .map(|j| (dest, j))
+    }
+
+    /// Adds a volume envelope to send `send` on `t` by adding it to the
+    /// receiving track's chunk (ticket 0016). REAPER has no call for it.
+    fn create_send_envelope(
+        &self,
+        t: *mut MediaTrack,
+        send: c_int,
+        target: EnvelopeTarget,
+    ) -> Result<()> {
+        let r = self.low();
+        let subject = format!("{target:?}");
+        let (dest, j) = self
+            .send_receive(t, send)
+            .ok_or_else(|| reaper_failed("matching the send to its receive", &subject))?;
+        let old = raw::track_chunk(r, dest)
+            .ok_or_else(|| reaper_failed("GetTrackStateChunk", &subject))?;
+        let guid = raw::new_guid(r).to_string();
+        let receive = usize::try_from(j)
+            .map_err(|_| reaper_failed("matching the send to its receive", &subject))?;
+        // The envelope starts at the send's volume, in fader scaling
+        // (`VOLTYPE 1`), so the sound does not change.
+        let start = r.ScaleToEnvelopeMode(1, raw::send_value(r, t, send, "D_VOL"));
+        let new =
+            chunk::add_send_volume_envelope(&old, receive, &guid, start).map_err(|e| match e {
+                chunk::SendEnvelopeError::NoReceive { .. } => reaper_failed(
+                    "finding the receive in the receiving track's chunk",
+                    &subject,
+                ),
+                chunk::SendEnvelopeError::Exists => {
+                    reaper_failed("finding the send's envelope that its chunk holds", &subject)
+                }
+            })?;
+        if raw::set_track_chunk(r, dest, &new) {
+            Ok(())
+        } else {
+            Err(reaper_failed(
+                "SetTrackStateChunk on the receiving track",
+                &subject,
+            ))
         }
     }
 
@@ -1073,12 +1131,9 @@ impl Session for Live {
                     self.existing(t, loc)
                 }
                 EnvLoc::Fx(fx, p) => raw::fx_envelope(r, t, fx, p, true),
-                EnvLoc::Send(_) => {
-                    return Err(invalid(
-                        "mort cannot create send envelopes yet",
-                        Some(format!("{target:?}")),
-                        "show the send's volume envelope once in REAPER (the send's button, then Volume envelope); mort can then write it",
-                    ));
+                EnvLoc::Send(i) => {
+                    self.create_send_envelope(t, i, target)?;
+                    self.existing(t, loc)
                 }
             };
             if env.is_none() {

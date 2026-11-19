@@ -114,6 +114,25 @@ pub fn send_dest(r: &Reaper, t: *mut MediaTrack, send: c_int) -> *mut MediaTrack
     p.cast::<MediaTrack>()
 }
 
+/// The number of receives (category -1) on a track.
+pub fn receive_count(r: &Reaper, t: *mut MediaTrack) -> c_int {
+    // SAFETY: `t` is a live track.
+    unsafe { r.GetTrackNumSends(t, -1) }
+}
+
+/// A new GUID from REAPER.
+pub fn new_guid(r: &Reaper) -> Guid {
+    let mut g = GUID {
+        Data1: 0,
+        Data2: 0,
+        Data3: 0,
+        Data4: [0; 8],
+    };
+    // SAFETY: `g` is a valid GUID to write into.
+    unsafe { r.genGuid(&raw mut g) };
+    guid(&g)
+}
+
 /// The number of FX in a track's chain.
 pub fn fx_count(r: &Reaper, t: *mut MediaTrack) -> c_int {
     // SAFETY: `t` is a live track.
@@ -557,11 +576,32 @@ pub fn fx_envelope(
     (!e.is_null()).then_some(e)
 }
 
-/// A send's volume envelope, if it has one.
+/// A send's volume envelope pointer. REAPER answers even for a send with
+/// no envelope; check `envelopes` to see whether it exists.
 pub fn send_envelope(r: &Reaper, t: *mut MediaTrack, send: c_int) -> Option<*mut TrackEnvelope> {
+    routing_envelope(r, t, 0, send)
+}
+
+/// A receive's volume envelope pointer: the same one its sender's send
+/// answers with.
+pub fn receive_envelope(
+    r: &Reaper,
+    t: *mut MediaTrack,
+    receive: c_int,
+) -> Option<*mut TrackEnvelope> {
+    routing_envelope(r, t, -1, receive)
+}
+
+fn routing_envelope(
+    r: &Reaper,
+    t: *mut MediaTrack,
+    category: c_int,
+    index: c_int,
+) -> Option<*mut TrackEnvelope> {
     let n = cstr("P_ENV:<VOLENV");
-    // SAFETY: `t` is a live track and `send` is below `send_count`.
-    let e = unsafe { r.GetSetTrackSendInfo(t, 0, send, n.as_ptr(), null_mut()) };
+    // SAFETY: `t` is a live track and `index` is below its count for
+    // `category`.
+    let e = unsafe { r.GetSetTrackSendInfo(t, category, index, n.as_ptr(), null_mut()) };
     (!e.is_null()).then(|| e.cast::<TrackEnvelope>())
 }
 

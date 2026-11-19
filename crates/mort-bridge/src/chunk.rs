@@ -1,4 +1,5 @@
-//! Reading and replacing one FX's state inside a REAPER track chunk.
+//! Reading and changing parts of a REAPER track chunk that the API cannot
+//! reach: one FX's state, a send's envelopes, and the audio chunk.
 //!
 //! REAPER has no call for one FX instance's state. A track's state chunk
 //! holds its FX chain as a `<FXCHAIN` block, in which each instance is a
@@ -189,9 +190,172 @@ pub fn audio_chunk(chunk: &str) -> String {
     out.join("\n")
 }
 
+/// The line numbers of a track chunk's `AUXRECV` lines, in order.
+fn receive_lines(lines: &[&str]) -> Vec<usize> {
+    let mut depth = 0usize;
+    let mut out = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        let line = raw.trim_start();
+        if line.starts_with('<') {
+            depth += 1;
+        } else if line == ">" {
+            depth = depth.saturating_sub(1);
+        } else if depth == 1 && line.starts_with("AUXRECV ") {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// The names of the envelope blocks (`<AUXVOLENV`, `<AUXPANENV`, …) that
+/// follow the `AUXRECV` line at `at`.
+fn receive_envelopes(lines: &[&str], at: usize) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut i = at + 1;
+    while let Some(line) = lines.get(i).map(|l| l.trim_start()) {
+        if !line.starts_with("<AUX") {
+            break;
+        }
+        names.push(line.split_whitespace().next().unwrap_or("").to_string());
+        let mut depth = 0usize;
+        while let Some(l) = lines.get(i).map(|l| l.trim_start()) {
+            if l.starts_with('<') {
+                depth += 1;
+            } else if l == ">" {
+                depth -= 1;
+            }
+            i += 1;
+            if depth == 0 {
+                break;
+            }
+        }
+    }
+    names
+}
+
+/// Why a send volume envelope could not be added to a chunk.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SendEnvelopeError {
+    /// The chunk has no `AUXRECV` line for that receive; it has `receives`.
+    NoReceive {
+        /// How many `AUXRECV` lines the chunk has.
+        receives: usize,
+    },
+    /// The receive already has a volume envelope.
+    Exists,
+}
+
+/// The receiving track's chunk with a volume envelope, `guid`, added to
+/// its receive number `receive` (in the order REAPER lists receives),
+/// active and shown in its own lane. Every other line is kept as it was.
+///
+/// A send's envelopes live in the receiving track's chunk, after its
+/// `AUXRECV` line (ticket 0016). REAPER drops an envelope block with no
+/// points, so the envelope starts with one at time 0 holding `start`, the
+/// send's volume in envelope units: the sound does not change until points
+/// are written.
+///
+/// # Errors
+///
+/// [`SendEnvelopeError`] if there is no such receive or it already has a
+/// volume envelope.
+pub fn add_send_volume_envelope(
+    chunk: &str,
+    receive: usize,
+    guid: &str,
+    start: f64,
+) -> Result<String, SendEnvelopeError> {
+    let lines: Vec<&str> = chunk.lines().collect();
+    let recvs = receive_lines(&lines);
+    let at = *recvs.get(receive).ok_or(SendEnvelopeError::NoReceive {
+        receives: recvs.len(),
+    })?;
+    if receive_envelopes(&lines, at)
+        .iter()
+        .any(|n| n == "<AUXVOLENV")
+    {
+        return Err(SendEnvelopeError::Exists);
+    }
+    let block = [
+        "<AUXVOLENV".to_string(),
+        format!("EGUID {guid}"),
+        "ACT 1 -1".into(),
+        "VIS 1 1 1".into(),
+        "LANEHEIGHT 0 0".into(),
+        "ARM 0".into(),
+        "DEFSHAPE 0 -1 -1".into(),
+        "VOLTYPE 1".into(),
+        format!("PT 0 {start} 0"),
+        ">".into(),
+    ];
+    let mut out: Vec<String> = lines[..=at].iter().map(|l| (*l).to_string()).collect();
+    out.extend(block);
+    out.extend(lines[at + 1..].iter().map(|l| (*l).to_string()));
+    let mut text = out.join("\n");
+    if chunk.ends_with('\n') {
+        text.push('\n');
+    }
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const RECEIVER: &str = "<TRACK
+  NAME Verb
+  AUXRECV 0 0 1 0 0 0 0 0 0 -1:U 0 -1 ''
+  AUXRECV 1 0 0.5 0 0 0 0 0 0 -1:U 0 -1 ''
+  <AUXPANENV
+    EGUID {AAAAAAAA-0000-0000-0000-000000000000}
+    ACT 1 -1
+  >
+  AUXRECV 1 0 0.25 0 0 0 0 0 0 -1:U 0 -1 ''
+  <AUXVOLENV
+    EGUID {BBBBBBBB-0000-0000-0000-000000000000}
+    ACT 1 -1
+    PT 0 1 0
+  >
+  MIDIOUT -1
+  <FXCHAIN
+    SHOW 0
+    AUXRECV 9 not a receive
+  >
+>
+";
+
+    #[test]
+    fn adds_a_volume_envelope_and_keeps_the_rest() {
+        let g = "{CCCCCCCC-0000-0000-0000-000000000000}";
+        let out = add_send_volume_envelope(RECEIVER, 1, g, 0.5).unwrap();
+        // The block goes straight after the receive's line, before its pan
+        // envelope, holds one point, and nothing else moves.
+        let added: Vec<&str> = out.lines().skip(4).take(10).collect();
+        assert_eq!(added[0], "<AUXVOLENV");
+        assert_eq!(added[1], format!("EGUID {g}"));
+        assert_eq!(added[8], "PT 0 0.5 0");
+        assert_eq!(added[9], ">");
+        let mut rest: Vec<&str> = out.lines().take(4).collect();
+        rest.extend(out.lines().skip(14));
+        assert_eq!(rest, RECEIVER.lines().collect::<Vec<_>>());
+        assert!(out.ends_with(">\n"));
+
+        // Receive 1 has a pan envelope only; receive 0 has none.
+        assert!(add_send_volume_envelope(RECEIVER, 0, g, 1.0).is_ok());
+        assert_eq!(
+            add_send_volume_envelope(&out, 1, g, 1.0),
+            Err(SendEnvelopeError::Exists)
+        );
+        assert_eq!(
+            add_send_volume_envelope(RECEIVER, 2, g, 1.0),
+            Err(SendEnvelopeError::Exists)
+        );
+        // Lines inside the FX chain are not receives.
+        assert_eq!(
+            add_send_volume_envelope(RECEIVER, 3, g, 1.0),
+            Err(SendEnvelopeError::NoReceive { receives: 3 })
+        );
+    }
 
     const CHUNK: &str = "<TRACK
   NAME Bass
