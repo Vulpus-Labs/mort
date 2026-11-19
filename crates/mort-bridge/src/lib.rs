@@ -12,6 +12,7 @@
 
 pub mod audition;
 pub mod dispatch;
+pub mod feed;
 pub mod measure;
 pub mod methods;
 pub mod probes;

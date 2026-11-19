@@ -457,6 +457,24 @@ r = call("batch", {"summary": "smoke twin", "calls": [
 check("a failed batch is rolled back, and only it",
       "error" in r and "Twin" in names() and "Ghost" not in names(), str(names()))
 
+# --- The view and the change feed (ticket 0018) -----------------------------
+r = call("map.view", {"start": 0.0, "end": 4.0, "step": 0.5}).get("result", {})
+rows = r.get("rows", [])
+check("map.view: master first, every track a row, cells with source and age",
+      rows and rows[0]["master"] and len(rows) == n_tracks + 1
+      and any(c and c.get("s") for row in rows for c in row["cells"]),
+      str(r.get("error") or [(x["name"], x["unmeasured"]) for x in rows]))
+v0 = call("map.watch", {"since": 0, "timeout_ms": 0}).get("result", {})
+t0 = _time.time()
+v1 = call("map.watch", {"since": v0.get("version", 0), "timeout_ms": 300}).get("result", {})
+check("map.watch: times out with nothing new, answered off the main thread",
+      v1.get("changes") == [] and 0.25 < _time.time() - t0 < 2, str(v1))
+call("thresholds.set", {"name": "headroom", "value": -2.0})
+v2 = call("map.watch", {"since": v0.get("version", 0), "timeout_ms": 2000}).get("result", {})
+check("map.watch: a threshold change wakes it",
+      any(c["kind"] == "thresholds" for c in v2.get("changes", [])), str(v2))
+call("thresholds.set", {"name": "headroom", "reset": True})
+
 check("every edit left an undo point", not no_undo_point, ", ".join(no_undo_point) or "all did")
 
 # Save the smoke project's copy so REAPER can quit without asking.

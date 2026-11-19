@@ -122,11 +122,28 @@ a time.
   monitoring change could have been heard on either side of the change,
   so they are dropped. The next stretch starts with the next tick's
   frames.
-- Stretches are added to the map when they end. A long, unbroken
-  playback adds nothing until it stops or splits. Ticket 0018 needs the
-  map to fill in while the person listens; it can close a stretch every
-  few seconds and continue it without a new warm-up, since the analyzer
-  runs on uninterrupted.
+- A stretch is one capture that grows while it plays (ticket 0018). Every
+  2 s of playback is committed to it (`MixMap::extend`), with no new
+  warm-up, and the warm-up and short-term rules count from where the
+  playback began. So the map fills in while the person listens.
+
+## Notes from ticket 0018
+
+- Staleness changes are announced once the hash cache (now shared by
+  the auditioner and the feed) is ready for the new state. Each change
+  lists the tracks whose stale spans moved. A capture is announced as it
+  is added, and the staleness baseline is refreshed quietly after it. The
+  cache keeps the last four states' snapshots: a stretch that ends
+  because the state moved still needs the one before.
+- `map.view` cells are compact: `c` coverage (0–1), `s` source, `t`
+  time taken, `x` stale reason, `k` finding kinds and `f` worst
+  severity; empty cells are `null`. Rows say why a track is unmeasured
+  (`no probe`, `muted`).
+- A section's findings are cached under a signature of the state, the
+  overrides, and the captures covering it (only the parts inside it).
+  `map.findings` reports which sections it recomputed.
+- The feed keeps the last 256 changes. A watcher further behind gets
+  `reset: true` and should fetch the view again.
 - mort's own `play` now starts no run, so what it plays is an audition.
   REAPER plays on until the job's next tick stops the transport, and the
   map keeps what was heard: up to about 0.25 s past the end in REAPER

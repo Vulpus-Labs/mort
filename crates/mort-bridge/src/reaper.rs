@@ -110,7 +110,13 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
     }
     crate::probes::start_draining();
     let (tx, rx) = mpsc::channel();
-    let server = Server::start(&socket_dir(), &std::process::id().to_string(), tx)?;
+    let feed = std::sync::Arc::new(crate::feed::Feed::new());
+    let server = Server::start_with_feed(
+        &socket_dir(),
+        &std::process::id().to_string(),
+        tx,
+        Some(std::sync::Arc::clone(&feed)),
+    )?;
     log(&format!(
         "mort bridge {BUILD} listening at {}",
         server.path().display()
@@ -130,7 +136,7 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
                 crate::methods::register_midi(&mut d);
                 crate::methods::register_transport(&mut d);
                 crate::methods::register_probes(&mut d);
-                crate::measure::register_measure(&mut d);
+                crate::measure::register_measure_with_feed(&mut d, feed);
                 d
             },
             _server: server,

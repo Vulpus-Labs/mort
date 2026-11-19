@@ -42,7 +42,10 @@ impl FakeBridge {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 let (tx, rx) = mpsc::channel();
-                let _server = Server::start(&dir, "bridge", tx).unwrap();
+                let feed = std::sync::Arc::new(mort_bridge::feed::Feed::new());
+                let _server =
+                    Server::start_with_feed(&dir, "bridge", tx, Some(std::sync::Arc::clone(&feed)))
+                        .unwrap();
                 let mut d: Dispatcher<FakeSession> = Dispatcher::new(rx);
                 d.register("test.missing", false, |_, _| {
                     Outcome::Value(Err(ErrorObject::new(
@@ -60,7 +63,7 @@ impl FakeBridge {
                 mort_bridge::methods::register_midi(&mut d);
                 mort_bridge::methods::register_transport(&mut d);
                 mort_bridge::methods::register_probes(&mut d);
-                mort_bridge::measure::register_measure(&mut d);
+                mort_bridge::measure::register_measure_with_feed(&mut d, feed);
                 let mut session = FakeSession::new();
                 setup(&mut session);
                 ready_tx.send(()).unwrap();

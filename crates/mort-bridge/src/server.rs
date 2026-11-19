@@ -3,8 +3,9 @@
 //! One thread accepts connections. Each connection gets a reader thread,
 //! which parses lines and passes requests to the main thread, and a writer
 //! thread, which writes whatever the main thread sends it. Lines that are
-//! not valid messages are answered by the reader directly. None of these
-//! threads call REAPER.
+//! not valid messages are answered by the reader directly, and so is
+//! `map.watch`, from the change feed (ADR 0012 §8). None of these threads
+//! call REAPER.
 
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -19,6 +20,7 @@ use std::thread::{self, JoinHandle};
 use mort_proto::{Message, Response};
 
 use crate::dispatch::Inbound;
+use crate::feed::Feed;
 
 /// The directory sockets live in: `$TMPDIR/mort`.
 #[must_use]
@@ -44,6 +46,20 @@ impl Server {
     ///
     /// If the directory or socket cannot be created.
     pub fn start(dir: &Path, name: &str, inbound: Sender<Inbound>) -> io::Result<Server> {
+        Self::start_with_feed(dir, name, inbound, None)
+    }
+
+    /// As [`Server::start`], answering `map.watch` from `feed`.
+    ///
+    /// # Errors
+    ///
+    /// If the directory or socket cannot be created.
+    pub fn start_with_feed(
+        dir: &Path,
+        name: &str,
+        inbound: Sender<Inbound>,
+        feed: Option<Arc<Feed>>,
+    ) -> io::Result<Server> {
         fs::create_dir_all(dir)?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
         remove_dead_sockets(dir);
@@ -63,7 +79,7 @@ impl Server {
             let streams = Arc::clone(&streams);
             thread::Builder::new()
                 .name("mort-accept".into())
-                .spawn(move || accept_loop(&listener, &stop, &streams, &inbound))?
+                .spawn(move || accept_loop(&listener, &stop, &streams, &inbound, feed.as_ref()))?
         };
         Ok(Server {
             path,
@@ -106,6 +122,7 @@ fn accept_loop(
     stop: &AtomicBool,
     streams: &Mutex<Vec<UnixStream>>,
     inbound: &Sender<Inbound>,
+    feed: Option<&Arc<Feed>>,
 ) {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     for stream in listener.incoming() {
@@ -146,19 +163,56 @@ fn accept_loop(
                 }
             });
         let inbound = inbound.clone();
+        let feed = feed.cloned();
         let _ = thread::Builder::new()
             .name(format!("mort-read-{conn}"))
-            .spawn(move || read_loop(conn, read, &tx, &inbound));
+            .spawn(move || read_loop(conn, read, &tx, &inbound, feed.as_deref()));
     }
 }
 
-fn read_loop(conn: u64, stream: UnixStream, tx: &Sender<String>, inbound: &Sender<Inbound>) {
+#[derive(serde::Deserialize)]
+struct WatchParams {
+    #[serde(default)]
+    since: u64,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+fn read_loop(
+    conn: u64,
+    stream: UnixStream,
+    tx: &Sender<String>,
+    inbound: &Sender<Inbound>,
+    feed: Option<&Feed>,
+) {
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
         match Message::parse(&line) {
+            Ok(Message::Request(request)) if request.method == "map.watch" && feed.is_some() => {
+                let feed = feed.expect("checked");
+                let params = if request.params.is_null() {
+                    serde_json::json!({})
+                } else {
+                    request.params.clone()
+                };
+                let reply = match serde_json::from_value::<WatchParams>(params) {
+                    Ok(p) => Response::ok(
+                        request.id,
+                        feed.watch(
+                            p.since,
+                            std::time::Duration::from_millis(p.timeout_ms.unwrap_or(30_000)),
+                        ),
+                    ),
+                    Err(e) => Response::err(
+                        Some(request.id),
+                        mort_proto::ErrorObject::invalid_params("map.watch", &e.to_string()),
+                    ),
+                };
+                let _ = tx.send(Message::Response(reply).to_line());
+            }
             Ok(Message::Request(request)) => {
                 if inbound.send(Inbound::Request { conn, request }).is_err() {
                     return;

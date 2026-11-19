@@ -30,7 +30,10 @@ use mort_proto::model::TrackInfo;
 use mort_proto::{ErrorKind, ErrorObject, TrackId};
 use mort_session::Session;
 
+use std::sync::Arc;
+
 use crate::dispatch::{Ctx, Dispatcher, Job, JobPoll, Outcome};
+use crate::feed::{Feed, Kind as FeedKind};
 use crate::methods::{NoParams, check_range, ensure_probes, is_probe, parse, probe_slot, read};
 
 /// The map and where it is saved.
@@ -43,16 +46,98 @@ pub struct Store {
     pub(crate) overrides: Overrides,
     /// Why `thresholds.toml` could not be read, if it could not.
     thresholds_error: Option<String>,
-    /// Grows with every change to the map or the thresholds (ADR 0012 §8).
-    pub(crate) version: u64,
+    /// Where changes are announced (ADR 0012 §8).
+    pub(crate) feed: Arc<Feed>,
+    /// Chunk hashes for the current state, built across ticks.
+    pub(crate) hashes: crate::audition::HashCache,
+    /// The stale spans last announced, and the state they were for.
+    stale_seen: Option<(u64, BTreeMap<TrackId, Vec<Span>>)>,
+    /// Whether new data has changed what is stale since then, though the
+    /// state has not moved.
+    stale_dirty: bool,
+    /// Findings per section, with the signature they were computed for.
+    pub(crate) findings_cache: FindingsCache,
 }
 
+/// Findings by section (start and end bits, name), with the signature of
+/// what they were computed from.
+pub(crate) type FindingsCache =
+    std::collections::HashMap<(u64, u64, String), (u64, Vec<findings::Finding>)>;
+
 impl Store {
-    fn new() -> Self {
+    fn new(feed: Arc<Feed>) -> Self {
         Self {
             map: MixMap::new(),
-            ..Self::default()
+            path: None,
+            save_error: None,
+            overrides: Overrides::default(),
+            thresholds_error: None,
+            feed,
+            hashes: crate::audition::HashCache::default(),
+            stale_seen: None,
+            stale_dirty: false,
+            findings_cache: FindingsCache::new(),
         }
+    }
+
+    /// Announces new data from a capture.
+    pub(crate) fn note_capture(&mut self, tracks: Vec<TrackId>, span: Span) {
+        self.feed.note(FeedKind::Capture, tracks, vec![span]);
+        // New data changes what is stale; take that as the baseline
+        // quietly, since the capture itself was announced.
+        self.stale_dirty = true;
+    }
+
+    /// On each tick: once the hashes for the current state are ready,
+    /// works out what is stale, and announces what changed since last time
+    /// if the state moved.
+    pub(crate) fn watch_staleness<S: Session>(&mut self, s: &S) {
+        let state = s.state();
+        if !self.stale_dirty && self.stale_seen.as_ref().is_some_and(|(st, _)| *st == state) {
+            return;
+        }
+        self.hashes.work(s, state, crate::audition::HASH_BUDGET);
+        let Some((hashes, routing)) = self
+            .hashes
+            .snapshot(state)
+            .map(|snap| (snap.hashes.clone(), snap.routing.clone()))
+        else {
+            return;
+        };
+        let now = Now {
+            hashes,
+            routing,
+            tempo: s.tempo_map(),
+        };
+        let now_stale = self.map.stale(&now, None);
+        let moved = self.stale_seen.as_ref().is_some_and(|(st, _)| *st != state);
+        if moved {
+            let before = self
+                .stale_seen
+                .as_ref()
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default();
+            let tracks: Vec<TrackId> = now_stale
+                .keys()
+                .chain(before.keys())
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter(|t| now_stale.get(t) != before.get(t))
+                .collect();
+            if !tracks.is_empty() {
+                let spans = tracks
+                    .iter()
+                    .flat_map(|t| now_stale.get(t).into_iter().chain(before.get(t)).flatten())
+                    .copied()
+                    .reduce(|a, b| a.union(b))
+                    .into_iter()
+                    .collect();
+                self.feed.note(FeedKind::Stale, tracks, spans);
+            }
+        }
+        self.stale_seen = Some((state, now_stale));
+        self.stale_dirty = false;
     }
 
     fn dir(&self) -> Option<PathBuf> {
@@ -88,7 +173,6 @@ impl Store {
             Err(_) if self.overrides == Overrides::default() => {}
             Err(_) => self.write_thresholds(),
         }
-        self.version += 1;
     }
 
     fn write_thresholds(&mut self) {
@@ -110,7 +194,7 @@ impl Store {
             None => self.overrides.reset(name)?,
         }
         self.write_thresholds();
-        self.version += 1;
+        self.feed.note(FeedKind::Thresholds, vec![], vec![]);
         Ok(())
     }
 
@@ -121,7 +205,10 @@ impl Store {
             return;
         }
         self.path = path;
-        self.version += 1;
+        self.feed.note(FeedKind::Project, vec![], vec![]);
+        self.stale_seen = None;
+        self.stale_dirty = false;
+        self.findings_cache.clear();
         self.sync_thresholds();
         if let Some(dir) = self.dir() {
             match store::load(&dir) {
@@ -378,7 +465,9 @@ impl MeasureJob {
             tracks: before.tracks,
         };
         let mut st = self.store.borrow_mut();
+        let span = capture.span;
         let added = st.map.add(capture, measured);
+        st.note_capture(added.frames.keys().copied().collect(), span);
         st.save(false);
         let list: Vec<Value> = self
             .targets
@@ -533,10 +622,11 @@ fn with_view<S: Session, T>(
     s: &S,
     store: &Shared,
     q: &RangeQuery,
-    f: impl FnOnce(&View<'_>, &Overrides) -> Result<T, ErrorObject>,
+    f: impl FnOnce(&View<'_>, &mut Extra<'_>) -> Result<T, ErrorObject>,
 ) -> Result<T, ErrorObject> {
-    let mut st = store.borrow_mut();
-    st.sync(s);
+    let mut guard = store.borrow_mut();
+    guard.sync(s);
+    let st = &mut *guard;
     let range = query_range(&st.map, q)?;
     let (hashes, routing, _) = project_now(s)?;
     let now = Now {
@@ -551,7 +641,77 @@ fn with_view<S: Session, T>(
         tracks: track_meta(s)?,
         sections: sections(&s.regions(), range),
     };
-    f(&view, &st.overrides)
+    let mut extra = Extra {
+        overrides: &st.overrides,
+        cache: &mut st.findings_cache,
+        state: s.state(),
+        version: st.feed.version(),
+    };
+    f(&view, &mut extra)
+}
+
+/// What a query needs besides the view.
+pub(crate) struct Extra<'a> {
+    overrides: &'a Overrides,
+    cache: &'a mut FindingsCache,
+    state: u64,
+    version: u64,
+}
+
+/// What a section's findings depend on: the state (staleness, gains,
+/// MIDI), the thresholds, and which captures cover it where.
+fn section_sig(map: &MixMap, span: Span, state: u64, thresholds: u64) -> u64 {
+    let mut bytes = Vec::new();
+    bytes.extend(state.to_le_bytes());
+    bytes.extend(thresholds.to_le_bytes());
+    for t in map.tracks() {
+        // Only the part inside the section: a cover split elsewhere leaves
+        // the section's data as it was.
+        for c in map.covers(t) {
+            let Some(part) = c.span.intersect(span) else {
+                continue;
+            };
+            bytes.extend(t.0.0.to_le_bytes());
+            bytes.extend(c.capture.to_le_bytes());
+            bytes.extend(part.start.to_bits().to_le_bytes());
+            bytes.extend(part.end.to_bits().to_le_bytes());
+        }
+    }
+    fnv(&bytes)
+}
+
+/// The view's findings over the project's thresholds, shown at the
+/// project's minimum severity, recomputing only sections whose inputs
+/// changed (ADR 0012 §8). Also returns the sections recomputed.
+fn cached_findings(v: &View<'_>, x: &mut Extra<'_>) -> (Vec<findings::Finding>, Vec<String>) {
+    let lim = x.overrides.limits();
+    let thresholds = fnv(x.overrides.to_toml().as_bytes());
+    let mut recomputed = Vec::new();
+    let per = v
+        .sections
+        .iter()
+        .map(|sec| {
+            let sig = section_sig(v.map, sec.span, x.state, thresholds);
+            let key = (
+                sec.span.start.to_bits(),
+                sec.span.end.to_bits(),
+                sec.name.clone(),
+            );
+            match x.cache.get(&key) {
+                Some((g, fs)) if *g == sig => fs.clone(),
+                _ => {
+                    let fs = findings::section_findings(v, &lim, sec);
+                    x.cache.insert(key, (sig, fs.clone()));
+                    recomputed.push(sec.name.clone());
+                    fs
+                }
+            }
+        })
+        .collect();
+    let mut all = findings::assemble(per, findings::jump_findings(v, &lim));
+    let min = x.overrides.min_severity();
+    all.retain(|f| f.severity >= min);
+    (all, recomputed)
 }
 
 #[derive(Deserialize)]
@@ -589,8 +749,129 @@ fn thresholds_json(store: &Store) -> Value {
         "min_severity": store.overrides.min_severity(),
         "file": store.thresholds_file(),
         "error": store.thresholds_error,
-        "version": store.version,
+        "version": store.feed.version(),
     })
+}
+
+/// `map.view` (ADR 0012 §8): the whole map as a grid of tracks against
+/// time, for the view. Rows are the master and then the tracks in project
+/// order, with their folder depth. A cell holds how much of it is covered
+/// (`c`), the source (`s`) and time (`t`) of its newest data, why that
+/// data is stale (`x`), and the kinds (`k`) and worst severity (`f`) of
+/// findings on it. Cells with nothing in them are `null`.
+#[expect(
+    clippy::many_single_char_names,
+    clippy::too_many_lines,
+    reason = "one grid"
+)]
+fn map_view<S: Session>(
+    s: &S,
+    v: &View<'_>,
+    x: &mut Extra<'_>,
+    step: Option<f64>,
+) -> Result<Value, ErrorObject> {
+    let (Some(first), Some(last)) = (v.sections.first(), v.sections.last()) else {
+        return Err(invalid("the range is empty", "give a range"));
+    };
+    let range = first.span.union(last.span);
+    let step = step.unwrap_or(0.5).max(0.05);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a few thousand columns"
+    )]
+    let n = (((range.end - range.start) / step).ceil() as usize).clamp(1, 20_000);
+    let (fs, recomputed) = cached_findings(v, x);
+    let tracks = s.tracks();
+    let master = s.master();
+    let parents: std::collections::HashMap<TrackId, Option<TrackId>> =
+        tracks.iter().map(|t| (t.id, t.parent)).collect();
+    let depth = |t: TrackId| {
+        let mut d = 0;
+        let mut at = parents.get(&t).copied().flatten();
+        while let Some(p) = at {
+            d += 1;
+            at = parents.get(&p).copied().flatten();
+        }
+        d
+    };
+    let mut rows = Vec::new();
+    let all = std::iter::once(s.track(master)?).chain(tracks.iter().cloned());
+    for t in all {
+        let unmeasured = if !t.fx.iter().any(is_probe) {
+            Some("no probe")
+        } else if t.mute {
+            Some("muted")
+        } else {
+            None
+        };
+        let segs = v.map.segments(t.id);
+        #[expect(clippy::cast_precision_loss, reason = "column indices are small")]
+        let cells: Vec<Value> = (0..n)
+            .map(|k| {
+                let cell = Span::new(
+                    range.start + k as f64 * step,
+                    range.start + (k + 1) as f64 * step,
+                );
+                let mut covered = 0.0;
+                let mut newest: Option<&mort_map::Capture> = None;
+                for seg in &segs {
+                    if let Some(o) = seg.span.intersect(cell) {
+                        covered += o.end - o.start;
+                        let c = v.map.capture(seg.capture);
+                        if c.is_some_and(|c| {
+                            newest.is_none_or(|n| (c.taken, c.id) > (n.taken, n.id))
+                        }) {
+                            newest = c;
+                        }
+                    }
+                }
+                let Some(c) = newest else {
+                    return Value::Null;
+                };
+                let mut out = json!({
+                    "c": (100.0 * covered / step).round() / 100.0,
+                    "s": c.source,
+                    "t": c.taken,
+                });
+                if let Some(why) = v.map.staleness(t.id, c.id, v.now) {
+                    out["x"] = json!(why);
+                }
+                let here: Vec<&findings::Finding> = fs
+                    .iter()
+                    .filter(|f| f.tracks.contains(&t.id) && f.span.intersect(cell).is_some())
+                    .collect();
+                if let Some(worst) = here.iter().map(|f| f.severity).reduce(f64::max) {
+                    let kinds: BTreeSet<&str> = here.iter().map(|f| f.kind.name()).collect();
+                    out["f"] = json!(worst);
+                    out["k"] = json!(kinds);
+                }
+                out
+            })
+            .collect();
+        rows.push(json!({
+            "track": t.id,
+            "name": t.name,
+            "depth": if t.id == master { 0 } else { depth(t.id) },
+            "master": t.id == master,
+            "unmeasured": unmeasured,
+            "cells": cells,
+        }));
+    }
+    Ok(json!({
+        "version": x.version,
+        "start": range.start,
+        "end": range.end,
+        "step": step,
+        "columns": n,
+        "sections": v.sections,
+        "rows": rows,
+        "findings": fs,
+        "now": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        "recomputed": recomputed,
+    }))
 }
 
 /// The two captures to compare: those given, or the latest capture over
@@ -706,69 +987,8 @@ fn the_track<S: Session>(s: &S, q: &RangeQuery) -> Result<TrackId, ErrorObject> 
     Ok(t)
 }
 
-/// Registers the queries and findings of ticket 0013 over `store`.
-fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared) {
-    let st = Rc::clone(store);
-    read(d, "map.findings", move |s: &S, q: RangeQuery| {
-        with_view(s, &st, &q, |v, o| {
-            let lim = if q.all {
-                mort_map::thresholds::Limits::ALL
-            } else {
-                o.limits()
-            };
-            let mut fs = findings::findings(v, &lim);
-            if !q.all {
-                fs.retain(|f| f.severity >= o.min_severity());
-            }
-            if let Some(kinds) = &q.kinds {
-                fs.retain(|f| kinds.contains(&f.kind));
-            }
-            Ok(json!({ "sections": v.sections, "findings": fs }))
-        })
-    });
-    let st = Rc::clone(store);
-    read(d, "map.summary", move |s: &S, q: RangeQuery| {
-        with_view(s, &st, &q, |v, o| {
-            let mut fs = findings::findings(v, &o.limits());
-            fs.retain(|f| f.severity >= o.min_severity());
-            Ok(json!({ "sections": query::summary(v, &fs), "findings": fs.len() }))
-        })
-    });
-    let st = Rc::clone(store);
-    read(d, "map.track", move |s: &S, q: RangeQuery| {
-        let t = the_track(s, &q)?;
-        with_view(s, &st, &q, |v, _| {
-            let name = v.meta(t).map(|m| m.name.clone());
-            Ok(json!({ "track": t, "name": name, "sections": query::track(v, t) }))
-        })
-    });
-    let st = Rc::clone(store);
-    read(d, "map.frames", move |s: &S, q: RangeQuery| {
-        let t = the_track(s, &q)?;
-        if q.features.is_empty() {
-            return Err(invalid(
-                "name the features to read",
-                &format!(
-                    "give `features`: any of {}, band:<Hz>, side:<Hz>",
-                    query::SCALARS.join(", ")
-                ),
-            ));
-        }
-        with_view(s, &st, &q, |v, _| {
-            let range = v.sections.first().map_or(Span::new(0.0, 0.0), |a| {
-                a.span.union(v.sections.last().map_or(a.span, |b| b.span))
-            });
-            let r = query::frames(v, t, range, &q.features, q.step.unwrap_or(0.05))
-                .map_err(|e| invalid(e, "see `mort frames --help`"))?;
-            Ok(
-                json!({ "track": t, "columns": r.columns, "rows": r.rows, "stale": v.stale(t, range) }),
-            )
-        })
-    });
-    let st = Rc::clone(store);
-    read(d, "map.compare", move |s: &S, q: RangeQuery| {
-        compare_query(s, &st, &q)
-    });
+/// Registers `thresholds.get` and `thresholds.set` (ticket 0019).
+fn register_thresholds<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared) {
     let st = Rc::clone(store);
     read(d, "thresholds.get", move |s: &S, _: NoParams| {
         let mut store = st.borrow_mut();
@@ -809,13 +1029,87 @@ fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared)
     );
 }
 
+/// Registers the queries and findings of ticket 0013 over `store`.
+fn register_queries<S: Session + 'static>(d: &mut Dispatcher<S>, store: &Shared) {
+    let st = Rc::clone(store);
+    read(d, "map.findings", move |s: &S, q: RangeQuery| {
+        with_view(s, &st, &q, |v, x| {
+            let (mut fs, recomputed) = if q.all {
+                (
+                    findings::findings(v, &mort_map::thresholds::Limits::ALL),
+                    vec![],
+                )
+            } else {
+                cached_findings(v, x)
+            };
+            if let Some(kinds) = &q.kinds {
+                fs.retain(|f| kinds.contains(&f.kind));
+            }
+            Ok(json!({ "sections": v.sections, "findings": fs, "recomputed": recomputed }))
+        })
+    });
+    let st = Rc::clone(store);
+    read(d, "map.summary", move |s: &S, q: RangeQuery| {
+        with_view(s, &st, &q, |v, x| {
+            let (fs, _) = cached_findings(v, x);
+            Ok(json!({ "sections": query::summary(v, &fs), "findings": fs.len() }))
+        })
+    });
+    let st = Rc::clone(store);
+    read(d, "map.view", move |s: &S, q: RangeQuery| {
+        with_view(s, &st, &q, |v, x| map_view(s, v, x, q.step))
+    });
+    let st = Rc::clone(store);
+    read(d, "map.track", move |s: &S, q: RangeQuery| {
+        let t = the_track(s, &q)?;
+        with_view(s, &st, &q, |v, _: &mut Extra<'_>| {
+            let name = v.meta(t).map(|m| m.name.clone());
+            Ok(json!({ "track": t, "name": name, "sections": query::track(v, t) }))
+        })
+    });
+    let st = Rc::clone(store);
+    read(d, "map.frames", move |s: &S, q: RangeQuery| {
+        let t = the_track(s, &q)?;
+        if q.features.is_empty() {
+            return Err(invalid(
+                "name the features to read",
+                &format!(
+                    "give `features`: any of {}, band:<Hz>, side:<Hz>",
+                    query::SCALARS.join(", ")
+                ),
+            ));
+        }
+        with_view(s, &st, &q, |v, _: &mut Extra<'_>| {
+            let range = v.sections.first().map_or(Span::new(0.0, 0.0), |a| {
+                a.span.union(v.sections.last().map_or(a.span, |b| b.span))
+            });
+            let r = query::frames(v, t, range, &q.features, q.step.unwrap_or(0.05))
+                .map_err(|e| invalid(e, "see `mort frames --help`"))?;
+            Ok(
+                json!({ "track": t, "columns": r.columns, "rows": r.rows, "stale": v.stale(t, range) }),
+            )
+        })
+    });
+    let st = Rc::clone(store);
+    read(d, "map.compare", move |s: &S, q: RangeQuery| {
+        compare_query(s, &st, &q)
+    });
+}
+
 /// Registers `measure` and `map.status` (ticket 0012), and the queries
 /// `map.summary`, `map.track`, `map.frames`, `map.findings` and
 /// (ticket 0013), `map.compare` (ticket 0014), and `thresholds.get` and
 /// `thresholds.set` (ticket 0019).
 pub fn register_measure<S: Session + 'static>(d: &mut Dispatcher<S>) {
-    let shared: Shared = Rc::new(RefCell::new(Store::new()));
+    register_measure_with_feed(d, Arc::new(Feed::new()));
+}
+
+/// As [`register_measure`], announcing changes on `feed`, which the
+/// server answers `map.watch` from (ADR 0012 §8).
+pub fn register_measure_with_feed<S: Session + 'static>(d: &mut Dispatcher<S>, feed: Arc<Feed>) {
+    let shared: Shared = Rc::new(RefCell::new(Store::new(feed)));
     register_queries(d, &shared);
+    register_thresholds(d, &shared);
     let mut auditions = crate::audition::Auditioner::new(Rc::clone(&shared));
     d.on_tick(move |s| auditions.tick(s));
     let st = Rc::clone(&shared);

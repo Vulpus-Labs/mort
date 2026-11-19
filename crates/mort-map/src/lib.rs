@@ -452,7 +452,21 @@ impl MixMap {
         }
         next.push(Cover { capture: id, span });
         next.sort_by(|a, b| a.span.start.total_cmp(&b.span.start));
-        *covers = next;
+        // Join neighbours from the same capture: a capture that grows lays
+        // its new part next to its old one.
+        let mut joined: Vec<Cover> = Vec::with_capacity(next.len());
+        for c in next {
+            match joined.last_mut() {
+                Some(l)
+                    if l.capture == c.capture
+                        && (c.span.start - l.span.end).abs() <= STAMP_SLACK =>
+                {
+                    l.span.end = c.span.end;
+                }
+                _ => joined.push(c),
+            }
+        }
+        *covers = joined;
     }
 
     /// Adds a capture with its frames by track. The capture's `id` is
@@ -490,6 +504,47 @@ impl MixMap {
             superseded,
             dropped: self.trim(),
         }
+    }
+
+    /// Grows capture `id` with more frames, to `end`: a stretch of
+    /// playback that is still going (ADR 0012). The new frames must start
+    /// after the capture's. `tempo` is [`tempo_fingerprint`] up to the new
+    /// end. Returns false if there is no such capture.
+    pub fn extend(
+        &mut self,
+        id: u64,
+        frames: BTreeMap<TrackId, Vec<TimedFrame>>,
+        end: f64,
+        tempo: u64,
+    ) -> bool {
+        let Some(c) = self.captures.get_mut(&id) else {
+            return false;
+        };
+        let from = c.span.end;
+        if end <= from {
+            return true;
+        }
+        c.span.end = end;
+        c.tempo = tempo;
+        let part = Span::new(from, end);
+        let own = self.frames.entry(id).or_default();
+        let mut touched = Vec::new();
+        for (t, mut fs) in frames {
+            fs.retain(|f| part.holds_frame(f.start));
+            if fs.is_empty() {
+                continue;
+            }
+            fs.sort_by(|a, b| a.start.total_cmp(&b.start));
+            let start = fs[0].start.max(from);
+            own.entry(t).or_default().extend(fs);
+            touched.push((t, Span::new(start, end)));
+        }
+        for (t, span) in touched {
+            self.cover(t, id, span);
+        }
+        self.added.insert(id);
+        self.changed = true;
+        true
     }
 
     /// Forgets superseded captures beyond the latest [`HISTORY`]. Returns

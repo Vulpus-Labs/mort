@@ -53,7 +53,7 @@ const FRAME: f64 = 0.05;
 const JUMP: f64 = 0.5 * FRAME;
 
 /// How much of a tick hashing may use.
-const HASH_BUDGET: Duration = Duration::from_millis(2);
+pub(crate) const HASH_BUDGET: Duration = Duration::from_millis(2);
 
 /// What playback was like.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,14 +69,26 @@ struct Context {
 struct Stretch {
     ctx: Context,
     frames: BTreeMap<TrackId, Vec<TimedFrame>>,
+    /// Where each track's playback began: the warm-up and short-term rules
+    /// count from here, across commits of a long stretch.
+    origin: BTreeMap<TrackId, f64>,
+    /// Each track's last frame stamp, to see jumps across commits.
+    last: BTreeMap<TrackId, f64>,
+    /// The capture the stretch's first committed part became: later parts
+    /// extend it.
+    capture: std::rc::Rc<std::cell::Cell<Option<u64>>>,
 }
+
+/// A stretch playing longer than this is committed to the map in parts,
+/// so that the map fills in while the person listens (ADR 0012 §10).
+pub const COMMIT_EVERY: f64 = 2.0;
 
 /// The project as a capture records it, for one state.
 #[derive(Debug, Clone)]
-struct Snapshot {
-    hashes: BTreeMap<TrackId, u64>,
-    routing: Routing,
-    tracks: Vec<TrackMeta>,
+pub(crate) struct Snapshot {
+    pub(crate) hashes: BTreeMap<TrackId, u64>,
+    pub(crate) routing: Routing,
+    pub(crate) tracks: Vec<TrackMeta>,
 }
 
 /// Chunk hashes for the current state, filled in a few tracks at a time.
@@ -85,13 +97,18 @@ pub struct HashCache {
     state: Option<u64>,
     todo: Vec<TrackId>,
     hashes: BTreeMap<TrackId, u64>,
-    ready: Option<(u64, Snapshot)>,
+    /// Snapshots of the last few states, newest last: a stretch that ends
+    /// because the state moved still needs the one before.
+    ready: Vec<(u64, Snapshot)>,
 }
+
+/// How many states' snapshots the cache keeps.
+const KEEP: usize = 4;
 
 impl HashCache {
     /// Works on the hashes for `state` for up to `budget`.
-    fn work<S: Session>(&mut self, s: &S, state: u64, budget: Duration) {
-        if self.ready.as_ref().is_some_and(|(r, _)| *r == state) {
+    pub(crate) fn work<S: Session>(&mut self, s: &S, state: u64, budget: Duration) {
+        if self.ready.iter().any(|(r, _)| *r == state) {
             return;
         }
         if self.state != Some(state) {
@@ -115,7 +132,7 @@ impl HashCache {
             let Ok(meta) = track_meta(s) else {
                 return;
             };
-            self.ready = Some((
+            self.ready.push((
                 state,
                 Snapshot {
                     hashes: std::mem::take(&mut self.hashes),
@@ -123,21 +140,20 @@ impl HashCache {
                     tracks: meta,
                 },
             ));
+            if self.ready.len() > KEEP {
+                self.ready.remove(0);
+            }
         }
     }
 
-    fn snapshot(&self, state: u64) -> Option<&Snapshot> {
-        self.ready
-            .as_ref()
-            .filter(|(r, _)| *r == state)
-            .map(|(_, s)| s)
+    pub(crate) fn snapshot(&self, state: u64) -> Option<&Snapshot> {
+        self.ready.iter().find(|(r, _)| *r == state).map(|(_, s)| s)
     }
 }
 
 /// Folds auditions into the map. See the module docs.
 pub struct Auditioner {
     store: Shared,
-    cache: HashCache,
     open: Option<Stretch>,
     closed: Vec<Stretch>,
     last: Option<Context>,
@@ -156,7 +172,6 @@ impl Auditioner {
     pub fn new(store: Shared) -> Self {
         Self {
             store,
-            cache: HashCache::default(),
             open: None,
             closed: Vec::new(),
             last: None,
@@ -191,6 +206,11 @@ impl Auditioner {
     /// One tick. See the module docs.
     pub fn tick<S: Session>(&mut self, s: &mut S) {
         let playing = s.is_playing();
+        {
+            let mut store = self.store.borrow_mut();
+            store.feed.transport(s.position(), playing);
+            store.watch_staleness(&*s);
+        }
         let waiting = self.open.is_some() || !self.closed.is_empty();
         let raw = s.take_frames(0);
         if !playing && !waiting && raw.is_empty() {
@@ -234,6 +254,8 @@ impl Auditioner {
         }
         if !playing {
             self.close();
+        } else if self.open_length() >= COMMIT_EVERY {
+            self.commit();
         }
         self.last = Some(ctx);
         self.playing = playing;
@@ -241,7 +263,7 @@ impl Auditioner {
         // the cache moves on to the new state.
         self.finish(&*s);
         if playing || !self.closed.is_empty() {
-            self.cache.work(&*s, state, HASH_BUDGET);
+            self.store.borrow_mut().hashes.work(&*s, state, HASH_BUDGET);
         }
         self.finish(&*s);
         self.save_if_done();
@@ -253,15 +275,14 @@ impl Auditioner {
             let open = self.open.get_or_insert_with(|| Stretch {
                 ctx: ctx.clone(),
                 frames: BTreeMap::new(),
+                origin: BTreeMap::new(),
+                last: BTreeMap::new(),
+                capture: std::rc::Rc::default(),
             });
             // Where each track's frames first jump from where it was.
             let mut cut: BTreeMap<TrackId, usize> = BTreeMap::new();
             for (t, fs) in &frames {
-                let mut expect = open
-                    .frames
-                    .get(t)
-                    .and_then(|v| v.last())
-                    .map(|f| f.start + FRAME);
+                let mut expect = open.last.get(t).map(|l| l + FRAME);
                 for (i, f) in fs.iter().enumerate() {
                     if expect.is_some_and(|e| (f.start - e).abs() > JUMP) {
                         cut.insert(*t, i);
@@ -277,6 +298,10 @@ impl Auditioner {
                 if let Some(i) = cut.get(&t) {
                     rest.insert(t, fs.split_off(*i));
                 }
+                if let (Some(first), Some(last)) = (fs.first(), fs.last()) {
+                    open.origin.entry(t).or_insert(first.start);
+                    open.last.insert(t, last.start);
+                }
                 open.frames.entry(t).or_default().extend(fs);
             }
             if cut.is_empty() {
@@ -285,6 +310,32 @@ impl Auditioner {
             self.close();
             frames = rest;
         }
+    }
+
+    /// Hands the open stretch's frames so far to the map, keeping the
+    /// stretch open: the next part needs no warm-up.
+    fn commit(&mut self) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let part = Stretch {
+            ctx: open.ctx.clone(),
+            frames: std::mem::take(&mut open.frames),
+            origin: open.origin.clone(),
+            last: open.last.clone(),
+            capture: std::rc::Rc::clone(&open.capture),
+        };
+        self.closed.push(part);
+    }
+
+    /// How long the open stretch's uncommitted frames run.
+    fn open_length(&self) -> f64 {
+        self.open.as_ref().map_or(0.0, |o| {
+            o.frames
+                .values()
+                .filter_map(|v| Some(v.last()?.start - v.first()?.start))
+                .fold(0.0, f64::max)
+        })
     }
 
     fn close(&mut self) {
@@ -299,8 +350,8 @@ impl Auditioner {
         let state = s.state();
         let mut keep = Vec::new();
         for st in std::mem::take(&mut self.closed) {
-            if let Some(snap) = self.cache.snapshot(st.ctx.state) {
-                let snap = snap.clone();
+            let snap = self.store.borrow().hashes.snapshot(st.ctx.state).cloned();
+            if let Some(snap) = snap {
                 self.add(s, &st, &snap);
             } else if st.ctx.state == state {
                 keep.push(st);
@@ -328,6 +379,17 @@ impl Auditioner {
             return;
         }
         let span = Span::new(start, end);
+        if let Some(id) = st.capture.get() {
+            let tracks: Vec<TrackId> = capture_frames.keys().copied().collect();
+            let mut store = self.store.borrow_mut();
+            let from = store.map.capture(id).map_or(start, |c| c.span.end);
+            let tempo = mort_map::tempo_fingerprint(s.tempo_map(), end);
+            if store.map.extend(id, capture_frames, end, tempo) {
+                store.note_capture(tracks, Span::new(from, end));
+                self.unsaved = true;
+            }
+            return;
+        }
         let capture = Capture {
             id: 0,
             span,
@@ -347,7 +409,10 @@ impl Auditioner {
         };
         let mut store = self.store.borrow_mut();
         store.sync(s);
+        let tracks: Vec<TrackId> = capture_frames.keys().copied().collect();
         let added = store.map.add(capture, capture_frames);
+        st.capture.set(Some(added.id));
+        store.note_capture(tracks, span);
         self.file.get_or_insert(added.id);
         self.unsaved = true;
     }
@@ -402,7 +467,7 @@ fn valid(st: &Stretch, snap: &Snapshot) -> Option<BTreeMap<TrackId, Vec<TimedFra
             continue;
         }
         let Some(first) = fs.first() else { continue };
-        let t0 = first.start;
+        let t0 = st.origin.get(t).copied().unwrap_or(first.start);
         let kept: Vec<TimedFrame> = fs
             .iter()
             .filter(|f| f.start >= t0 + WARM_UP - 1e-6)

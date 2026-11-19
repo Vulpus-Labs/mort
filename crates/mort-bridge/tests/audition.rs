@@ -284,3 +284,45 @@ fn one_playback_is_one_frames_file() {
     assert_eq!(sources(&again), ["audition", "audition"]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_long_playback_fills_the_map_as_it_goes() {
+    let mut k = kit();
+    let mut seen_mid = None;
+    listen(&mut k.b, 0.0, 10.0, |b, at| {
+        if (at - 5.0).abs() < 0.05 {
+            b.tick();
+            let m = status(b);
+            seen_mid = spans(&m, "Kick").last().map(|s| s.1);
+        }
+    });
+    let mid = seen_mid.expect("looked at 5 s");
+    assert!((2.5..=5.0).contains(&mid), "covered to {mid} s at 5 s");
+    let m = status(&mut k.b);
+    // The parts join up: no second warm-up after a commit.
+    let kick = spans(&m, "Kick");
+    assert!(
+        (kick[0].0 - 0.7).abs() < 0.01 && (kick.last().unwrap().1 - 10.0).abs() < 0.01,
+        "{kick:?}"
+    );
+    for w in kick.windows(2) {
+        assert!(
+            (w[0].1 - w[1].0).abs() < 0.01,
+            "a gap between parts: {kick:?}"
+        );
+    }
+    // Short-term loudness is known from 3 s into the playback, not into
+    // each part.
+    let f = k.b.ok(
+        "map.frames",
+        json!({ "track": k.bass, "start": 3.0, "end": 10.0, "features": ["short_term_lufs"], "step": 1.0 }),
+    );
+    assert!(
+        f["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| !r[1][0].is_null()),
+        "{f}"
+    );
+}

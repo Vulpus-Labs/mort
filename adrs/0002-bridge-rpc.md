@@ -21,7 +21,10 @@ example an agent and a person's shell.
    A timer callback registered with REAPER (`plugin_register("timer")`, run
    at UI rate) drains the queue on the main thread, with a time budget of
    about 8 ms per tick so the UI stays responsive. Responses go back
-   through the socket thread.
+   through the socket thread. One method is the exception: `map.watch`
+   (ADR 0012 §8) is answered by the socket thread itself, from a change
+   feed the main thread updates, so a client waiting for changes never
+   holds a place in the queue.
 3. **Jobs:** any request that waits on audio (`play`, `render`, `measure`)
    returns a job id at once. `job.wait(id, timeout)` blocks the client, not
    the main thread. `job.status` and `job.cancel` do what they say. A job

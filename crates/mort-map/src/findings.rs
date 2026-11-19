@@ -507,23 +507,51 @@ fn register_clash(v: &View<'_>, lim: &Limits, sec: &Section, out: &mut Vec<Findi
     }
 }
 
-/// Every finding in the view's sections, by section, most severe first.
+/// Rounds a finding's severity and notes the overridden thresholds it
+/// used.
+fn finish(f: &mut Finding, lim: &Limits) {
+    f.severity = round2(f.severity);
+    f.overridden = used_by(f.kind)
+        .iter()
+        .filter(|k| lim.get(k) != Limits::DEFAULT.get(k))
+        .map(|k| (*k).to_owned())
+        .collect();
+}
+
+/// The findings inside one section (all kinds but loudness jumps, which
+/// sit between sections), most severe first.
 #[must_use]
-pub fn findings(v: &View<'_>, lim: &Limits) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for sec in &v.sections {
-        let mut here = Vec::new();
-        masking(v, lim, sec, &mut here);
-        excess(v, lim, sec, Kind::Mud, &mut here);
-        excess(v, lim, sec, Kind::Harsh, &mut here);
-        headroom(v, lim, sec, &mut here);
-        low_end_width(v, lim, sec, &mut here);
-        register_clash(v, lim, sec, &mut here);
-        here.sort_by(|a, b| b.severity.total_cmp(&a.severity));
-        out.extend(here);
+pub fn section_findings(v: &View<'_>, lim: &Limits, sec: &Section) -> Vec<Finding> {
+    let mut here = Vec::new();
+    masking(v, lim, sec, &mut here);
+    excess(v, lim, sec, Kind::Mud, &mut here);
+    excess(v, lim, sec, Kind::Harsh, &mut here);
+    headroom(v, lim, sec, &mut here);
+    low_end_width(v, lim, sec, &mut here);
+    register_clash(v, lim, sec, &mut here);
+    here.sort_by(|a, b| b.severity.total_cmp(&a.severity));
+    for f in &mut here {
+        finish(f, lim);
     }
+    here
+}
+
+/// Loudness jumps at the boundaries between the view's sections.
+#[must_use]
+pub fn jump_findings(v: &View<'_>, lim: &Limits) -> Vec<Finding> {
     let mut jumps = Vec::new();
     loudness_jumps(v, lim, &mut jumps);
+    for f in &mut jumps {
+        finish(f, lim);
+    }
+    jumps
+}
+
+/// Puts per-section findings and jumps in time order: each jump before
+/// the findings of the section it leads into.
+#[must_use]
+pub fn assemble(per_section: Vec<Vec<Finding>>, jumps: Vec<Finding>) -> Vec<Finding> {
+    let mut out: Vec<Finding> = per_section.into_iter().flatten().collect();
     for j in jumps {
         let at = out
             .iter()
@@ -531,13 +559,16 @@ pub fn findings(v: &View<'_>, lim: &Limits) -> Vec<Finding> {
             .unwrap_or(out.len());
         out.insert(at, j);
     }
-    for f in &mut out {
-        f.severity = round2(f.severity);
-        f.overridden = used_by(f.kind)
-            .iter()
-            .filter(|k| lim.get(k) != Limits::DEFAULT.get(k))
-            .map(|k| (*k).to_owned())
-            .collect();
-    }
     out
+}
+
+/// Every finding in the view's sections, by section, most severe first.
+#[must_use]
+pub fn findings(v: &View<'_>, lim: &Limits) -> Vec<Finding> {
+    let per = v
+        .sections
+        .iter()
+        .map(|sec| section_findings(v, lim, sec))
+        .collect();
+    assemble(per, jump_findings(v, lim))
 }
