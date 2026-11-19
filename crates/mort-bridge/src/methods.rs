@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use mort_proto::model::{EnvelopePoint, EnvelopeTarget};
+use mort_proto::model::{ControlChange, EnvelopePoint, EnvelopeTarget, Note};
 use mort_proto::{ErrorObject, FxId, Position, Range, TrackId};
 use mort_session::Session;
 
@@ -408,6 +408,115 @@ pub fn register_automation<S: Session + 'static>(d: &mut Dispatcher<S>) {
     read(d, "param.parse", |s: &S, p: ParamParse| {
         let value = value_for_text(s, p.fx, p.index, &p.text)?;
         Ok(json!({ "value": value, "display": s.format_param(p.fx, p.index, value)? }))
+    });
+}
+
+// --- MIDI (ticket 0008) -----------------------------------------------------
+
+#[derive(Deserialize)]
+struct MidiRead {
+    track: TrackId,
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+enum MidiMode {
+    /// Keep what is there.
+    #[default]
+    Add,
+    /// Remove notes starting, and CCs falling, in the range first.
+    Replace,
+}
+
+#[derive(Deserialize)]
+struct MidiWrite {
+    track: TrackId,
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
+    #[serde(default)]
+    notes: Vec<Note>,
+    #[serde(default)]
+    ccs: Vec<ControlChange>,
+    #[serde(default)]
+    mode: MidiMode,
+}
+
+/// How far, in seconds, an item may fall short of an event and still hold
+/// it, allowing for rounding through REAPER's ticks.
+const MIDI_SLACK: f64 = 1e-6;
+
+/// Registers the MIDI methods of ticket 0008.
+pub fn register_midi<S: Session + 'static>(d: &mut Dispatcher<S>) {
+    read(d, "midi.read", |s: &S, p: MidiRead| {
+        let (lo, hi) = (
+            p.start.unwrap_or(f64::NEG_INFINITY),
+            p.end.unwrap_or(f64::INFINITY),
+        );
+        let mut items = Vec::new();
+        for it in s.items(p.track)?.into_iter().filter(|i| i.midi) {
+            if it.position + it.length <= lo || it.position >= hi {
+                continue;
+            }
+            let notes: Vec<Note> = s
+                .notes(it.id)?
+                .into_iter()
+                .filter(|n| n.start >= lo && n.start < hi)
+                .collect();
+            let ccs: Vec<ControlChange> = s
+                .control_changes(it.id)?
+                .into_iter()
+                .filter(|c| c.time >= lo && c.time < hi)
+                .collect();
+            items.push(json!({ "item": it, "notes": notes, "ccs": ccs }));
+        }
+        Ok(json!({ "items": items }))
+    });
+    edit(d, "midi.write", |s: &mut S, p: MidiWrite| {
+        let event_lo = p
+            .notes
+            .iter()
+            .map(|n| n.start)
+            .chain(p.ccs.iter().map(|c| c.time))
+            .reduce(f64::min);
+        let event_hi = p
+            .notes
+            .iter()
+            .map(|n| n.end)
+            .chain(p.ccs.iter().map(|c| c.time))
+            .reduce(f64::max);
+        let start = p.start.or(event_lo).ok_or_else(|| {
+            mort_session::invalid(
+                "nothing to write and no range",
+                None,
+                "give notes, CCs or a range",
+            )
+        })?;
+        let end = p.end.or(event_hi).unwrap_or(start);
+        let (lo, hi) = (
+            start.min(event_lo.unwrap_or(start)),
+            end.max(event_hi.unwrap_or(end)),
+        );
+        let existing = s.items(p.track)?.into_iter().find(|i| {
+            i.midi && i.position <= lo + MIDI_SLACK && i.position + i.length >= hi - MIDI_SLACK
+        });
+        let (item, created) = match existing {
+            Some(i) => (i.id, false),
+            None => (
+                s.add_midi_item(p.track, lo, hi.max(lo + MIDI_SLACK * 2.0))?,
+                true,
+            ),
+        };
+        if p.mode == MidiMode::Replace && !created {
+            s.delete_midi(item, start, end.max(start + MIDI_SLACK))?;
+        }
+        s.insert_midi(item, &p.notes, &p.ccs)?;
+        Ok(json!({ "item": item, "created": created, "notes": p.notes.len(), "ccs": p.ccs.len() }))
     });
 }
 

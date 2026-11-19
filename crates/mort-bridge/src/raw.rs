@@ -590,6 +590,154 @@ pub fn action_on_track(r: &Reaper, t: *mut MediaTrack, command: c_int) {
     }
 }
 
+// --- MIDI ------------------------------------------------------------------
+
+/// Creates an empty MIDI item from `start` to `end` seconds.
+pub fn create_midi_item(
+    r: &Reaper,
+    t: *mut MediaTrack,
+    start: f64,
+    end: f64,
+) -> Option<*mut MediaItem> {
+    let qn = false;
+    // SAFETY: `t` is a live track.
+    let i = unsafe { r.CreateNewMIDIItemInProj(t, start, end, &raw const qn) };
+    (!i.is_null()).then_some(i)
+}
+
+/// A note as REAPER stores it: (start ppq, end ppq, channel, pitch, velocity).
+pub type RawNote = (f64, f64, c_int, c_int, c_int);
+
+/// A control change: (ppq, channel, controller, value).
+pub type RawCc = (f64, c_int, c_int, c_int);
+
+/// The notes in a take.
+pub fn midi_notes(r: &Reaper, k: *mut MediaItem_Take) -> Vec<RawNote> {
+    // SAFETY: `k` is a live MIDI take; the out pointers are valid.
+    unsafe {
+        let (mut notes, mut ccs, mut texts) = (0, 0, 0);
+        r.MIDI_CountEvts(k, &raw mut notes, &raw mut ccs, &raw mut texts);
+        (0..notes)
+            .filter_map(|idx| {
+                let (mut sel, mut muted, mut start, mut end) = (false, false, 0.0, 0.0);
+                let (mut chan, mut pitch, mut vel) = (0, 0, 0);
+                r.MIDI_GetNote(
+                    k,
+                    idx,
+                    &raw mut sel,
+                    &raw mut muted,
+                    &raw mut start,
+                    &raw mut end,
+                    &raw mut chan,
+                    &raw mut pitch,
+                    &raw mut vel,
+                )
+                .then_some((start, end, chan, pitch, vel))
+            })
+            .collect()
+    }
+}
+
+/// The control changes (status 0xB0) in a take, with their indices.
+pub fn midi_ccs(r: &Reaper, k: *mut MediaItem_Take) -> Vec<(c_int, RawCc)> {
+    // SAFETY: `k` is a live MIDI take; the out pointers are valid.
+    unsafe {
+        let (mut notes, mut ccs, mut texts) = (0, 0, 0);
+        r.MIDI_CountEvts(k, &raw mut notes, &raw mut ccs, &raw mut texts);
+        (0..ccs)
+            .filter_map(|idx| {
+                let (mut sel, mut muted, mut ppq) = (false, false, 0.0);
+                let (mut msg, mut chan, mut num, mut val) = (0, 0, 0, 0);
+                r.MIDI_GetCC(
+                    k,
+                    idx,
+                    &raw mut sel,
+                    &raw mut muted,
+                    &raw mut ppq,
+                    &raw mut msg,
+                    &raw mut chan,
+                    &raw mut num,
+                    &raw mut val,
+                )
+                .then_some((msg, idx, (ppq, chan, num, val)))
+            })
+            .filter(|(msg, ..)| *msg == 0xB0)
+            .map(|(_, idx, cc)| (idx, cc))
+            .collect()
+    }
+}
+
+/// Adds notes and control changes, then sorts the take once.
+pub fn midi_insert(r: &Reaper, k: *mut MediaItem_Take, notes: &[RawNote], ccs: &[RawCc]) {
+    let no_sort = true;
+    // SAFETY: `k` is a live MIDI take.
+    unsafe {
+        for &(start, end, chan, pitch, vel) in notes {
+            r.MIDI_InsertNote(
+                k,
+                false,
+                false,
+                start,
+                end,
+                chan,
+                pitch,
+                vel,
+                &raw const no_sort,
+            );
+        }
+        for &(ppq, chan, num, val) in ccs {
+            r.MIDI_InsertCC(k, false, false, ppq, 0xB0, chan, num, val);
+        }
+        r.MIDI_Sort(k);
+    }
+}
+
+/// Deletes notes by index, highest first so indices stay valid.
+pub fn midi_delete_notes(r: &Reaper, k: *mut MediaItem_Take, mut idx: Vec<c_int>) {
+    idx.sort_unstable_by(|a, b| b.cmp(a));
+    // SAFETY: `k` is a live MIDI take; the indices came from it.
+    unsafe {
+        for i in idx {
+            r.MIDI_DeleteNote(k, i);
+        }
+        r.MIDI_Sort(k);
+    }
+}
+
+/// Deletes events from the CC list by index, highest first.
+pub fn midi_delete_ccs(r: &Reaper, k: *mut MediaItem_Take, mut idx: Vec<c_int>) {
+    idx.sort_unstable_by(|a, b| b.cmp(a));
+    // SAFETY: `k` is a live MIDI take; the indices came from it.
+    unsafe {
+        for i in idx {
+            r.MIDI_DeleteCC(k, i);
+        }
+        r.MIDI_Sort(k);
+    }
+}
+
+/// Project seconds to the take's ticks.
+pub fn ppq_at(r: &Reaper, k: *mut MediaItem_Take, seconds: f64) -> f64 {
+    // SAFETY: `k` is a live take.
+    unsafe { r.MIDI_GetPPQPosFromProjTime(k, seconds) }
+}
+
+/// The take's ticks to project seconds.
+pub fn seconds_at(r: &Reaper, k: *mut MediaItem_Take, ppq: f64) -> f64 {
+    // SAFETY: `k` is a live take.
+    unsafe { r.MIDI_GetProjTimeFromPPQPos(k, ppq) }
+}
+
+/// Marks an item changed, so the open undo block records it, and redraws
+/// it. REAPER's MIDI calls do neither on their own.
+pub fn update_item(r: &Reaper, i: *mut MediaItem) {
+    // SAFETY: `i` is a live item on a live track.
+    unsafe {
+        r.MarkTrackItemsDirty(r.GetMediaItemTrack(i), i);
+        r.UpdateItemInProject(i);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

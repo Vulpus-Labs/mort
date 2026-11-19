@@ -7,8 +7,10 @@ mod automation;
 mod client;
 mod edits;
 mod install;
+mod midi;
 mod resolve;
 mod show;
+mod smf;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -88,6 +90,9 @@ enum Command {
 
     /// List or write automation: volume, pan, sends and FX parameters.
     Automate(automation::Automate),
+
+    /// List or write MIDI notes and CCs.
+    Midi(midi::Midi),
 
     /// Undo mort's last edit. Refuses if the last edit was not mort's.
     Undo,
@@ -248,6 +253,7 @@ fn run(cli: &Cli) -> Result<Vec<String>, Outcome> {
             action: None,
         } => Err(Outcome::Usage("name a track: `mort fx <track>`".into())),
         Command::Automate(a) => edited(cli, |c| automation::run(c, a)),
+        Command::Midi(m) => edited(cli, |c| midi::run(c, m)),
         Command::Undo => edited(cli, |c| edits::undo(c, false)),
         Command::Redo => edited(cli, |c| edits::undo(c, true)),
         Command::Fx {

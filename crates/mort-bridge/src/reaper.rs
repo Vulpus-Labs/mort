@@ -35,7 +35,7 @@ use mort_proto::{
     EnvelopeId, ErrorKind, ErrorObject, FxId, Guid, ItemId, TakeId, TempoMap, TrackId,
 };
 use mort_session::{NewTrack, Result, SendChange, Session, TrackChange, invalid, not_found};
-use reaper_low::raw::{MediaTrack, TrackEnvelope};
+use reaper_low::raw::{MediaItem, MediaItem_Take, MediaTrack, TrackEnvelope};
 use std::os::raw::c_int;
 
 use crate::{chunk, raw};
@@ -117,6 +117,7 @@ fn start(mut session: ReaperSession) -> std::result::Result<(), Box<dyn Error>> 
                 crate::methods::register_reads(&mut d);
                 crate::methods::register_edits(&mut d);
                 crate::methods::register_automation(&mut d);
+                crate::methods::register_midi(&mut d);
                 d
             },
             _server: server,
@@ -320,6 +321,28 @@ impl Live {
         }
     }
 
+    fn find_midi(&self, id: ItemId) -> Result<(*mut MediaItem, *mut MediaItem_Take)> {
+        let r = self.low();
+        let item = self
+            .all_tracks()
+            .into_iter()
+            .flat_map(|t| raw::items(r, t))
+            .find(|i| raw::item_guid(r, *i) == Some(id.0))
+            .ok_or_else(|| {
+                not_found("item", id, "list a track's items with `mort midi <track>`")
+            })?;
+        let take = raw::active_take(r, item)
+            .filter(|k| raw::take_is_midi(r, *k))
+            .ok_or_else(|| {
+                invalid(
+                    "the item is not MIDI",
+                    Some(id.to_string()),
+                    "choose a MIDI item",
+                )
+            })?;
+        Ok((item, take))
+    }
+
     fn track_info(&self, t: *mut MediaTrack) -> TrackInfo {
         let r = self.low();
         let number = raw::track_value(r, t, "IP_TRACKNUMBER");
@@ -377,6 +400,10 @@ fn reaper_failed(call: &str, subject: &impl ToString) -> ErrorObject {
         "check the element in REAPER and try again; report it if it keeps failing",
     )
 }
+
+/// How far, in seconds, an event may lie outside its item and still be
+/// written, allowing for rounding through REAPER's ticks.
+const MIDI_SLACK: f64 = 1e-6;
 
 /// The largest linear gain REAPER's faders allow: +12 dB.
 const MAX_GAIN: f64 = 3.981_071_705_534_973;
@@ -1118,24 +1145,137 @@ impl Session for Live {
         Ok(items)
     }
 
-    fn add_midi_item(&mut self, _: TrackId, _: f64, _: f64) -> Result<ItemId> {
-        Err(later("0008"))
+    fn add_midi_item(&mut self, track: TrackId, start: f64, end: f64) -> Result<ItemId> {
+        if end <= start {
+            return Err(invalid(
+                format!("range {start}..{end} is empty"),
+                None,
+                "give an end after the start",
+            ));
+        }
+        let t = self.find_track(track)?;
+        let r = self.low();
+        let i = raw::create_midi_item(r, t, start, end)
+            .ok_or_else(|| reaper_failed("CreateNewMIDIItemInProj", &track))?;
+        raw::update_item(r, i);
+        raw::item_guid(r, i)
+            .map(ItemId)
+            .ok_or_else(|| reaper_failed("reading the new item's GUID", &track))
     }
 
-    fn notes(&self, _: ItemId) -> Result<Vec<Note>> {
-        Err(later("0008"))
+    fn notes(&self, item: ItemId) -> Result<Vec<Note>> {
+        let (_, k) = self.find_midi(item)?;
+        let r = self.low();
+        Ok(raw::midi_notes(r, k)
+            .into_iter()
+            .map(|(start, end, chan, pitch, vel)| Note {
+                pitch: u8::try_from(pitch).unwrap_or(0),
+                start: raw::seconds_at(r, k, start),
+                end: raw::seconds_at(r, k, end),
+                velocity: u8::try_from(vel).unwrap_or(0),
+                channel: u8::try_from(chan).unwrap_or(0),
+            })
+            .collect())
     }
 
-    fn control_changes(&self, _: ItemId) -> Result<Vec<ControlChange>> {
-        Err(later("0008"))
+    fn control_changes(&self, item: ItemId) -> Result<Vec<ControlChange>> {
+        let (_, k) = self.find_midi(item)?;
+        let r = self.low();
+        Ok(raw::midi_ccs(r, k)
+            .into_iter()
+            .map(|(_, (ppq, chan, num, val))| ControlChange {
+                time: raw::seconds_at(r, k, ppq),
+                controller: u8::try_from(num).unwrap_or(0),
+                value: u8::try_from(val).unwrap_or(0),
+                channel: u8::try_from(chan).unwrap_or(0),
+            })
+            .collect())
     }
 
-    fn insert_midi(&mut self, _: ItemId, _: &[Note], _: &[ControlChange]) -> Result<()> {
-        Err(later("0008"))
+    fn insert_midi(&mut self, item: ItemId, notes: &[Note], ccs: &[ControlChange]) -> Result<()> {
+        let (i, k) = self.find_midi(item)?;
+        let r = self.low();
+        let lo = raw::item_value(r, i, "D_POSITION");
+        let hi = lo + raw::item_value(r, i, "D_LENGTH");
+        let outside = notes
+            .iter()
+            .map(|n| (n.start, n.end))
+            .chain(ccs.iter().map(|c| (c.time, c.time)))
+            .find(|&(s, e)| s < lo - MIDI_SLACK || e > hi + MIDI_SLACK || e < s);
+        if let Some((s, e)) = outside {
+            return Err(invalid(
+                format!(
+                    "an event at {s}–{e}s lies outside the item ({lo}–{hi}s) or ends before it starts"
+                ),
+                Some(item.to_string()),
+                "lengthen the item or move the event",
+            ));
+        }
+        if let Some(n) = notes
+            .iter()
+            .find(|n| n.pitch > 127 || n.velocity == 0 || n.velocity > 127 || n.channel > 15)
+        {
+            return Err(invalid(
+                format!(
+                    "note pitch {}, velocity {}, channel {} is out of range",
+                    n.pitch, n.velocity, n.channel
+                ),
+                Some(item.to_string()),
+                "pitch 0–127, velocity 1–127, channel 0–15",
+            ));
+        }
+        let raw_notes: Vec<raw::RawNote> = notes
+            .iter()
+            .map(|n| {
+                (
+                    raw::ppq_at(r, k, n.start),
+                    raw::ppq_at(r, k, n.end),
+                    c_int::from(n.channel),
+                    c_int::from(n.pitch),
+                    c_int::from(n.velocity),
+                )
+            })
+            .collect();
+        let raw_ccs: Vec<raw::RawCc> = ccs
+            .iter()
+            .map(|c| {
+                (
+                    raw::ppq_at(r, k, c.time),
+                    c_int::from(c.channel),
+                    c_int::from(c.controller),
+                    c_int::from(c.value),
+                )
+            })
+            .collect();
+        raw::midi_insert(r, k, &raw_notes, &raw_ccs);
+        raw::update_item(r, i);
+        Ok(())
     }
 
-    fn delete_midi(&mut self, _: ItemId, _: f64, _: f64) -> Result<()> {
-        Err(later("0008"))
+    fn delete_midi(&mut self, item: ItemId, start: f64, end: f64) -> Result<()> {
+        let (i, k) = self.find_midi(item)?;
+        let r = self.low();
+        let notes: Vec<c_int> = raw::midi_notes(r, k)
+            .iter()
+            .zip(0..)
+            .filter(|((s, ..), _)| {
+                let t = raw::seconds_at(r, k, *s);
+                t >= start && t < end
+            })
+            .map(|(_, idx)| idx)
+            .collect();
+        raw::midi_delete_notes(r, k, notes);
+        let ccs: Vec<c_int> = raw::midi_ccs(r, k)
+            .into_iter()
+            .filter(|(_, (ppq, ..))| {
+                let t = raw::seconds_at(r, k, *ppq);
+                t >= start && t < end
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+        raw::midi_delete_ccs(r, k, ccs);
+        raw::update_item(r, i);
+        Ok(())
     }
 
     fn save_project(&mut self, path: Option<&str>) -> Result<()> {

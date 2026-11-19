@@ -57,6 +57,7 @@ impl FakeBridge {
                 mort_bridge::methods::register_reads(&mut d);
                 mort_bridge::methods::register_edits(&mut d);
                 mort_bridge::methods::register_automation(&mut d);
+                mort_bridge::methods::register_midi(&mut d);
                 let mut session = FakeSession::new();
                 setup(&mut session);
                 ready_tx.send(()).unwrap();
@@ -689,4 +690,153 @@ fn clear_and_write_are_one_undo_point() {
         "{t}"
     );
     assert!(ok(&b.mort(&["automate", "bass", "volume"])).contains("2 points"));
+}
+
+fn smf_bytes() -> Vec<u8> {
+    // Format 0, 480 ticks per quarter: C3 for a beat, then a G3 for half a beat.
+    let track = [
+        0x00, 0x90, 48, 100, 0x83, 0x60, 0x80, 48, 0, 0x00, 0x90, 55, 80, 0x81, 0x70, 55, 0, 0x00,
+        0xFF, 0x2F, 0x00,
+    ];
+    let mut f = b"MThd".to_vec();
+    f.extend(6u32.to_be_bytes());
+    f.extend(0u16.to_be_bytes());
+    f.extend(1u16.to_be_bytes());
+    f.extend(480u16.to_be_bytes());
+    f.extend(b"MTrk");
+    f.extend(u32::try_from(track.len()).unwrap().to_be_bytes());
+    f.extend(track);
+    f
+}
+
+#[test]
+fn midi_write_list_and_replace() {
+    let b = FakeBridge::start_with("midi", band);
+    assert!(ok(&b.mort(&["midi", "bass"])).starts_with("Bass: no MIDI"));
+
+    // A chord at 2.1 (+0b stacks), then a note a beat later, and a CC sweep.
+    let t = ok(&b.mort(&[
+        "midi",
+        "bass",
+        "2.1..3.1",
+        "C2:2.1:2b:90",
+        "E2:+0b:2b",
+        "G2:+1b:1b:70:3",
+        "cc1:2.1=0",
+        "cc1:+3b=127",
+    ]));
+    assert!(
+        t.starts_with("Bass: wrote 3 notes, 2 CCs into a new item"),
+        "{t}"
+    );
+    assert!(t.contains("item 2.1–3.1, 3 notes, 2 CCs"), "{t}");
+    let has = |words: &[&str]| {
+        t.lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>() == words)
+    };
+    assert!(has(&["2.1–2.3", "C2", "(36)", "v90", "ch1"]), "{t}");
+    assert!(has(&["2.1–2.3", "E2", "(40)", "v100", "ch1"]), "{t}");
+    assert!(has(&["2.2–2.3", "G2", "(43)", "v70", "ch3"]), "{t}");
+    assert!(has(&["2.4", "cc1", "=", "127", "ch1"]), "{t}");
+
+    // Replacing 2.1..2.2 removes the chord and the first CC, keeps G2, and
+    // writes into the same item.
+    let t = ok(&b.mort(&["midi", "bass", "2.1..2.2", "--replace", "A1:2.1:1b"]));
+    assert!(t.starts_with("Bass: wrote 1 note, 0 CCs\n"), "{t}");
+    let t = ok(&b.mort(&["midi", "bass"]));
+    assert!(
+        t.contains("2 notes, 1 CCs")
+            && t.contains("A1 (33)")
+            && t.contains("G2 (43)")
+            && !t.contains("C2"),
+        "{t}"
+    );
+
+    let t = ok(&b.mort(&["undo"]));
+    assert!(
+        t.starts_with("undid mort: MIDI on Bass: replace with 1 note, 0 CCs"),
+        "{t}"
+    );
+    assert!(ok(&b.mort(&["midi", "bass"])).contains("3 notes, 2 CCs"));
+
+    let t = ok(&b.mort(&["midi", "bass", "2.2..2.4"]));
+    assert!(
+        t.contains("1 notes, 0 CCs") && t.contains("G2"),
+        "range filters by start: {t}"
+    );
+}
+
+#[test]
+fn midi_from_files() {
+    let b = FakeBridge::start_with("midi-files", band);
+    let dir = tmp("midi-files");
+    let mid = dir.join("riff.mid");
+    std::fs::write(&mid, smf_bytes()).unwrap();
+    let t = ok(&b.mort(&["midi", "verb", "3.1..4.1", "--file", mid.to_str().unwrap()]));
+    assert!(t.contains("wrote 2 notes, 0 CCs"), "{t}");
+    let has = |words: &[&str]| {
+        t.lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>() == words)
+    };
+    assert!(has(&["3.1–3.2", "C3", "(48)", "v100", "ch1"]), "{t}");
+    assert!(has(&["3.2–3.2.480", "G3", "(55)", "v80", "ch1"]), "{t}");
+
+    let txt = dir.join("chords.txt");
+    std::fs::write(&txt, "# a chord\nC4:1.1:4b E4:+0b:4b\nG4:+0b:4b  # top\n").unwrap();
+    let t = ok(&b.mort(&["midi", "verb", "--file", txt.to_str().unwrap()]));
+    assert!(
+        t.contains("wrote 3 notes") && t.contains("1.1–2.1  G4 (67)"),
+        "{t}"
+    );
+
+    let o = b.mort(&["midi", "verb", "--file", mid.to_str().unwrap()]);
+    assert!(
+        stderr(&o).contains("a MIDI file needs a range"),
+        "{}",
+        stderr(&o)
+    );
+    let o = b.mort(&["midi", "verb", "1.1..2.1", "Q4:1.1"]);
+    assert!(stderr(&o).contains("`Q4` is not a pitch"), "{}", stderr(&o));
+    let o = b.mort(&["midi", "verb", "C4:1.1", "--replace"]);
+    assert!(
+        stderr(&o).contains("--replace needs a range"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn midi_follows_tempo_changes() {
+    let b = FakeBridge::start_with("midi-tempo", |s| {
+        band(s);
+        s.set_tempo_map(
+            mort_proto::SteppedTempoMap::new(vec![
+                mort_proto::TempoChange {
+                    bar: 1,
+                    bpm: 120.0,
+                    num: 4,
+                    den: 4,
+                },
+                mort_proto::TempoChange {
+                    bar: 3,
+                    bpm: 60.0,
+                    num: 4,
+                    den: 4,
+                },
+            ])
+            .unwrap(),
+        );
+    });
+    let v: Value =
+        serde_json::from_str(&stdout(&b.mort(&["--json", "midi", "bass", "C4:2.4:2b"]))).unwrap();
+    let item = v["item"].clone();
+    let read: Value = serde_json::from_str(&stdout(&b.mort(&["--json", "midi", "bass"]))).unwrap();
+    let n = &read["items"][0]["notes"][0];
+    // Beat 2.4 is 3.5 s at 120 bpm; a beat later the tempo halves, so the
+    // second beat lasts a second: 3.5 + 0.5 + 1.0.
+    assert_eq!(
+        (n["start"].as_f64().unwrap(), n["end"].as_f64().unwrap()),
+        (3.5, 5.0)
+    );
+    assert_eq!(read["items"][0]["item"]["id"], item);
 }

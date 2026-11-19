@@ -33,6 +33,9 @@ reaper.TrackFX_AddByName(bass, "ReaEQ", false, -1)
 local comp = reaper.TrackFX_AddByName(bass, "ReaComp", false, -1)
 reaper.TrackFX_SetEnabled(bass, comp, false)
 
+-- 120 bpm to bar 9 (16 s), then 90 bpm.
+reaper.AddTempoTimeSigMarker(proj, 16, 90, 4, 4, false)
+
 reaper.AddProjectMarker2(proj, true, 0, 16, "verse", 1, 0)
 reaper.AddProjectMarker2(proj, false, 8, 0, "drop", 2, 0)
 reaper.CreateNewMIDIItemInProj(bass, 0, 4, false)

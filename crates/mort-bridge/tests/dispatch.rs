@@ -406,3 +406,23 @@ fn a_failed_edit_never_undoes_the_one_before() {
     );
     assert_eq!(r.session.undo_label().as_deref(), Some("mort: add bass"));
 }
+
+#[test]
+fn edits_say_whether_they_left_an_undo_point() {
+    let mut r = rig("undo-point");
+    r.dispatcher.register("test.add", true, |ctx, _| {
+        Outcome::Value(
+            ctx.session
+                .add_track(NewTrack::default())
+                .map(|id| json!({ "track": id })),
+        )
+    });
+    // An edit that changes nothing leaves no undo point, and says so.
+    r.dispatcher
+        .register("test.nothing", true, |_, _| Outcome::Value(Ok(json!({}))));
+    let mut c = r.connect();
+    let v = r.call(&mut c, "test.add", json!({}));
+    assert_eq!(v["result"]["undo_point"], true);
+    let v = r.call(&mut c, "test.nothing", json!({}));
+    assert_eq!(v["result"]["undo_point"], false);
+}

@@ -104,12 +104,20 @@ check("items", len(items) == 1 and items[0]["midi"] and abs(items[0]["length"] -
       json.dumps(items))
 
 t = call("time.convert", {"to_seconds": ["9.1", "+4b"], "to_musical": [16.5]}).get("result", {})
-check("time", t.get("seconds") == [16.0, 18.0] and t.get("musical") == ["9.2"], json.dumps(t))
+# 120 bpm to bar 9, 90 bpm after: four beats from 9.1 take 8/3 s, and
+# 16.5 s is three quarters of a beat into bar 9.
+secs = t.get("seconds") or [0, 0]
+check("time across a tempo change",
+      secs[0] == 16.0 and abs(secs[1] - (16 + 8 / 3)) < 1e-9 and t.get("musical") == ["9.1.720"], json.dumps(t))
 
 # --- Edits (ticket 0006). These change the smoke project. ---------------
+no_undo_point = []
+
 def edit(method, params, summary):
     params = dict(params, summary=summary)
     r = call(method, params)
+    if "result" in r and r["result"].get("undo_point") is False:
+        no_undo_point.append(summary)
     return r.get("result"), r.get("error")
 
 def tracks():
@@ -240,6 +248,41 @@ r = call("undo")
 pts = call("envelope.points", {"target": vol})["result"]["points"]
 check("undo automation", r.get("result", {}).get("label") == "mort: smoke clear" and len(pts) == 3,
       f"{r.get('result') or r.get('error')} {len(pts)} points")
+
+# --- MIDI (ticket 0008) -----------------------------------------------------
+_, by = tracks()
+verb_id = by["Verb"]["id"]
+s0, s1 = call("time.convert", {"to_seconds": ["8.4", "+2b"]})["result"]["seconds"]
+r, e = edit("midi.write", {"track": verb_id, "notes": [{"pitch": 60, "start": s0, "end": s1, "velocity": 99, "channel": 2}],
+                          "ccs": [{"time": s0, "controller": 74, "value": 30}]}, "smoke midi across tempo")
+got = call("midi.read", {"track": verb_id})["result"]["items"]
+n = got[0]["notes"][0] if got and got[0]["notes"] else {}
+check("midi across a tempo change",
+      e is None and r["created"] and abs(n.get("start", 0) - 15.5) < 1e-6 and abs(n.get("end", 0) - (16 + 2 / 3)) < 1e-6
+      and (n.get("pitch"), n.get("velocity"), n.get("channel")) == (60, 99, 2)
+      and [(c["controller"], c["value"]) for c in got[0]["ccs"]] == [(74, 30)],
+      str(e or got))
+
+bass_id = by["Bass"]["id"]
+r, e = edit("midi.write", {"track": bass_id, "start": 0.0, "end": 2.0, "notes": [
+    {"pitch": 36, "start": 0.0, "end": 0.5, "velocity": 100}, {"pitch": 43, "start": 1.0, "end": 1.5, "velocity": 80}]},
+    "smoke midi into item")
+got = call("midi.read", {"track": bass_id})["result"]["items"]
+check("midi into an existing item", e is None and not r["created"] and len(got) == 1 and len(got[0]["notes"]) == 2,
+      str(e or [(i["item"]["position"], len(i["notes"])) for i in got]))
+r, e = edit("midi.write", {"track": bass_id, "start": 0.0, "end": 0.75, "mode": "replace",
+                           "notes": [{"pitch": 38, "start": 0.25, "end": 0.75, "velocity": 70}]}, "smoke midi replace")
+got = call("midi.read", {"track": bass_id})["result"]["items"]
+check("midi replace", e is None and [x["pitch"] for x in got[0]["notes"]] == [38, 43], str(e or got[0]["notes"]))
+r, e = edit("midi.write", {"track": bass_id, "start": 0.0, "end": 1.0,
+                           "notes": [{"pitch": 38, "start": 0.5, "end": 0.25, "velocity": 70}]}, "smoke midi bad")
+check("midi refuses a note that ends first", e is not None and e["data"]["kind"] == "invalid", str(e))
+r = call("undo")
+got = call("midi.read", {"track": bass_id})["result"]["items"]
+check("undo midi", r.get("result", {}).get("label") == "mort: smoke midi replace"
+      and [x["pitch"] for x in got[0]["notes"]] == [36, 43], f"{r.get('result') or r.get('error')} {got[0]['notes']}")
+
+check("every edit left an undo point", not no_undo_point, ", ".join(no_undo_point) or "all did")
 
 # Save the smoke project's copy so REAPER can quit without asking.
 import os

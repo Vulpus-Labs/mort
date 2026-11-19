@@ -42,6 +42,11 @@ act on a picture of the project the person has since changed.
    nothing changed. So a failed edit is rolled back only if the state
    moved inside its block and the top undo point carries its label. It can
    never undo the edit before it.
+8. **Edits say whether they left an undo point.** REAPER records only the
+   changes it is told about. MIDI calls, for example, need the item marked
+   dirty. An edit that REAPER failed to record would make the next `undo`
+   revert something older. So every edit result carries `undo_point`, and
+   the smoke script fails if any of its edits comes back without one.
 
 ## Consequences
 

@@ -177,6 +177,8 @@ pub struct Dispatcher<S> {
     held: bool,
     seen_state: Option<u64>,
     mort_state: Option<u64>,
+    /// Whether the last edit left an undo point with its label.
+    last_undo_point: bool,
 }
 
 fn invalid(message: impl Into<String>, fix: &str) -> ErrorObject {
@@ -230,6 +232,7 @@ impl<S: Session> Dispatcher<S> {
             held: false,
             seen_state: None,
             mort_state: None,
+            last_undo_point: false,
         }
     }
 
@@ -543,6 +546,7 @@ impl<S: Session> Dispatcher<S> {
         })?;
         if let Value::Object(o) = &mut v {
             o.insert("state".into(), json!(session.state()));
+            o.insert("undo_point".into(), json!(self.last_undo_point));
         }
         Ok(v)
     }
@@ -658,6 +662,8 @@ impl<S: Session> Dispatcher<S> {
         if result.is_err() && changed && session.undo_label().as_deref() == Some(label.as_str()) {
             session.undo();
         }
+        self.last_undo_point =
+            result.is_ok() && session.undo_label().as_deref() == Some(label.as_str());
         self.mort_state = Some(session.state());
         result
     }
