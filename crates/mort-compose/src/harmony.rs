@@ -357,6 +357,7 @@ impl Harmony {
         tones: Vec<Note>,
     ) -> Self {
         let root = name.pitch_class();
+        let has_third = tones.iter().any(|t| t.role == Role::Third);
         let has_seventh = tones
             .iter()
             .any(|t| matches!(t.role, Role::Seventh | Role::Sixth));
@@ -367,7 +368,7 @@ impl Harmony {
                 continue;
             }
             let note = Note {
-                role: tension_role(pc.above(root), has_seventh),
+                role: tension_role(pc.above(root), has_seventh, has_third),
                 pc,
             };
             if tones.iter().any(|t| pc.above(t.pc) == 1) {
@@ -588,8 +589,11 @@ fn scale_chord(def: &ScaleDef) -> Vec<(Role, u8)> {
 
 /// The role of a scale note `interval` semitones above the root that is
 /// not a chord tone.
-fn tension_role(interval: u8, has_seventh: bool) -> Role {
+fn tension_role(interval: u8, has_seventh: bool, has_third: bool) -> Role {
     match interval {
+        // A sus or power chord has no third: the scale's third is still a
+        // third (D over Bbsus2), not an 11th.
+        3 | 4 if !has_third => Role::Third,
         1..=3 => Role::Tension(9),
         4..=6 => Role::Tension(11),
         7 => Role::Fifth,
@@ -712,6 +716,18 @@ mod tests {
         assert_eq!(h.spell(p("D#4")), "D#4");
         let h = Harmony::parse("Cb lydian", None).unwrap();
         assert_eq!(h.spell(p("B3")), "Cb4", "octave follows the letter");
+    }
+
+    #[test]
+    fn a_sus_chord_spells_the_scale_third_as_a_third() {
+        let p = |t: &str| Pitch::parse(t).unwrap();
+        let h = Harmony::parse("Bbmaj7sus2", Some("D aeolian")).unwrap();
+        assert_eq!(h.spell(p("D2")), "D2");
+        assert_eq!(h.role_of(p("D2").class()), Some(Role::Third));
+        let h = Harmony::parse("Csus2", Some("D aeolian")).unwrap();
+        assert_eq!(h.spell(p("E4")), "E4");
+        let h = Harmony::parse("G7#9", None).unwrap();
+        assert_eq!(h.role_of(p("A#4").class()), Some(Role::Tension(9)), "with a 3rd, it stays a #9");
     }
 
     #[test]

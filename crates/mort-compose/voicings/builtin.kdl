@@ -125,7 +125,7 @@ voicing "root fifth" {
 
 voicing "guide tones" {
     description "The 3rd and 7th, with the 9th or 13th as a third voice: a line that moves by step and leaves room for other parts."
-    chord "3rd" "4th" "7th" "6th" "9th" "13th" "5th" tensions=#true
+    chord "3rd" "4th" "2nd" "7th" "6th" "9th" "13th" "5th" tensions=#true
     layout "close"
     voices 2 3
 }
