@@ -3,7 +3,7 @@
 track set Pad volume=-18
 track set Drone volume=-13.5
 track set Pulse volume=-16
-track set Glass volume=-6
+track set Glass volume=-9
 track set Hiss volume=-18.5
 track set Space volume=0
 commit

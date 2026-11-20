@@ -1,0 +1,8 @@
+// Glass was piercing: down an octave (8'), darker filter, softer attack,
+// darker reverb, a little quieter.
+set Glass Kritter Scale 0.5 normalised=#true
+set Glass Kritter "Low Pass" 0.68 normalised=#true
+set Glass Kritter Attack 0.2 normalised=#true
+set Glass Kritter "Reverb Damp" 0.7 normalised=#true
+track set Glass volume=-9
+commit
