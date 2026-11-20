@@ -194,6 +194,33 @@ modal writing works from a scale held over several bars.
    - **Performance** applies swing, timing deviations and velocity
      curves last, seeded per part and section.
 
+   As settled in ticket 0027 (the format is documented at the top of
+   `mort-compose/patterns/builtin.kdl`):
+   - Positions are beats from 1 (`1`, `2&`, `3e`, `4a`, `2.5`), with a
+     bar prefix inside longer patterns (`2:4&`), or `change` for once per
+     harmony. Positions past the end of a shorter meter's bar are
+     dropped.
+   - A hit lasts until its line's next position unless it gives
+     `length`. It never outlasts the block whose notes it plays, nor its
+     section.
+   - Besides `hit` lines, a pattern may hold one `arp` (up, down or
+     updown) or one `walk`. A walk plays each block's bass on the first
+     beat, scale and chord steps towards the next bass, and an approach
+     a semitone (or a scale step) away on the last beat. Its default
+     range is E1–G3.
+   - A pattern is pitched or `drums=#true`. Its non-chord tones are
+     skipped unless it says `nct="sound"`.
+   - Patterns and kits load like vocabularies: built-ins, then the
+     user's and the project's `patterns/` directories, replacing by name.
+     The built-in kit is `gm`.
+   - A part can play another part's voices with `from "Keys"
+     voice="bass"`. It shares that part's voicing, so the two agree.
+   - Feel is `feel swing=0.5..0.8 timing=TICKS velocity=STEPS seed=N`.
+     Swing delays the off-beat eighths to that fraction of the beat.
+     Timing and velocity add uniform deviations of up to the given
+     amount. The generator is a fixed SplitMix64, seeded from the part,
+     section and seed, so the same sheet always plays the same.
+
 9. **Inspection.** `mort compose show <section> --blocks` lists the
    voiced blocks with their labels. `--notes` lists the notes the
    articulation would write. Both are read-only, so harmony can be

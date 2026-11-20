@@ -253,8 +253,21 @@ pub fn parse(src: &str) -> Result<Sheet, SheetError> {
             }
         }
     }
-    // Parts may come before the sections they name, so check names last.
+    // Parts may come before the sections and parts they name, so check
+    // names last.
+    let part_names: Vec<String> = parts.iter().map(|(_, p)| p.name.clone()).collect();
     for (n, p) in parts {
+        if let Some((other, _)) = &p.from
+            && !part_names.contains(other)
+        {
+            return Err(node_err(
+                n,
+                format!(
+                    "part `{}` plays `from` part `{other}`, which the sheet does not have",
+                    p.name
+                ),
+            ));
+        }
         let named = p
             .sections
             .iter()

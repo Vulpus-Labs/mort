@@ -12,6 +12,15 @@
 //!     }
 //!     top "chorus" "D5" "-" "C5"           // top notes, one per harmony; - is free
 //!     fix "verse" bar=3 "D3 G3 C4 F4"      // a literal voicing at bar 3
+//!     articulation "bossa piano" range="A0..C8"  // how it is played
+//!     feel swing=0.6 timing=8 velocity=6 seed=1
+//! }
+//! part "Bass" {
+//!     from "Pad" voice="bass"              // play another part's voices
+//!     articulation "walking" range="E1..G3"
+//! }
+//! part "Drums" {
+//!     articulation "bossa drums" kit="gm"
 //! }
 //! ```
 
@@ -102,6 +111,14 @@ pub struct Spec {
     pub nct_beats: Option<f64>,
     /// A pedal pitch for the bass voice.
     pub pedal: Option<Pitch>,
+    /// The articulation pattern's name.
+    pub articulation: Option<String>,
+    /// The instrument's playable range, checked after articulation.
+    pub instrument: Option<Range>,
+    /// The drum kit map's name, for drum patterns.
+    pub kit: Option<String>,
+    /// Feel settings: swing, timing, velocity, seed.
+    pub feel: BTreeMap<String, f64>,
 }
 
 impl Spec {
@@ -118,6 +135,17 @@ impl Spec {
             nct: over.nct.clone().or_else(|| self.nct.clone()),
             nct_beats: over.nct_beats.or(self.nct_beats),
             pedal: over.pedal.or(self.pedal),
+            articulation: over
+                .articulation
+                .clone()
+                .or_else(|| self.articulation.clone()),
+            instrument: over.instrument.or(self.instrument),
+            kit: over.kit.clone().or_else(|| self.kit.clone()),
+            feel: {
+                let mut f = self.feel.clone();
+                f.extend(over.feel.iter().map(|(k, v)| (k.clone(), *v)));
+                f
+            },
         }
     }
 
@@ -180,6 +208,9 @@ pub struct Part {
     pub fixes: Vec<Fix>,
     /// Top-note lines.
     pub tops: Vec<Top>,
+    /// Another part whose blocks this one plays, and which of its voices
+    /// (all of them if empty), instead of voicing its own.
+    pub from: Option<(String, Vec<String>)>,
 }
 
 impl Part {
@@ -250,6 +281,7 @@ pub(crate) fn parse_part(
         overrides: BTreeMap::new(),
         fixes: Vec::new(),
         tops: Vec::new(),
+        from: None,
     };
     for c in n
         .children()
@@ -279,7 +311,7 @@ pub(crate) fn parse_part(
                         return Err(node_err(
                             g,
                             format!(
-                                "`{}` cannot be set per section; use voicing, weights, nct or pedal",
+                                "`{}` cannot be set per section; use voicing, weights, nct, pedal, articulation or feel",
                                 g.name().value()
                             ),
                         ));
@@ -288,13 +320,14 @@ pub(crate) fn parse_part(
                 part.overrides.insert(s, spec);
             }
             "top" => part.tops.push(read_top(c, node_err, entry_err)?),
+            "from" => part.from = Some(read_from(c, node_err, entry_err)?),
             "fix" => part.fixes.push(read_fix(c, node_err, entry_err)?),
             _ => {
                 if !read_spec(&mut part.spec, c, node_err, entry_err)? {
                     return Err(node_err(
                         c,
                         format!(
-                            "`{}` is not part of a part; a part holds voicing, weights, nct, pedal, in, section, top and fix",
+                            "`{}` is not part of a part; a part holds voicing, weights, nct, pedal, articulation, feel, from, in, section, top and fix",
                             c.name().value()
                         ),
                     ));
@@ -396,6 +429,8 @@ fn read_spec(
                 }
             }
         }
+        "articulation" => read_articulation(spec, c, node_err, entry_err)?,
+        "feel" => read_feel(spec, c, entry_err)?,
         "pedal" => {
             let a = args(c);
             let p = match a.as_slice() {
@@ -410,6 +445,95 @@ fn read_spec(
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+fn read_articulation(
+    spec: &mut Spec,
+    c: &KdlNode,
+    node_err: NodeErr<'_>,
+    entry_err: EntryErr<'_>,
+) -> Result<(), crate::sheet::SheetError> {
+    let a = args(c);
+    let [name] = a.as_slice() else {
+        return Err(node_err(
+            c,
+            "`articulation` takes a pattern's name, such as `articulation \"bossa piano\"`".into(),
+        ));
+    };
+    spec.articulation = Some(string(name, "a pattern's name", entry_err)?.to_string());
+    for (k, e) in props(c) {
+        match k {
+            "range" => {
+                let r = string(e, "`range`", entry_err)?;
+                spec.instrument = Some(Range::parse(r).ok_or_else(|| {
+                    entry_err(e, format!("`{r}` is not a range; write the instrument's lowest and highest pitch, such as \"E1..G4\""))
+                })?);
+            }
+            "kit" => spec.kit = Some(string(e, "`kit`", entry_err)?.to_string()),
+            other => {
+                return Err(entry_err(
+                    e,
+                    format!("`articulation` has `range` and `kit`, not `{other}`"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_feel(
+    spec: &mut Spec,
+    c: &KdlNode,
+    entry_err: EntryErr<'_>,
+) -> Result<(), crate::sheet::SheetError> {
+    for (k, e) in props(c) {
+        let ok = match (k, number(e)) {
+            ("swing", Some(v)) => (0.5..=0.8).contains(&v),
+            ("timing" | "velocity", Some(v)) => (0.0..=60.0).contains(&v),
+            ("seed", Some(v)) => v >= 0.0 && v.fract() == 0.0,
+            _ => false,
+        };
+        if !ok {
+            return Err(entry_err(
+                e,
+                format!(
+                    "`feel` takes swing=0.5..0.8 (0.5 is straight), timing=ticks, velocity=steps and seed=N; `{k}` is not one of them in range"
+                ),
+            ));
+        }
+        spec.feel.insert(k.to_string(), number(e).unwrap_or(0.0));
+    }
+    Ok(())
+}
+
+fn read_from(
+    node: &KdlNode,
+    node_err: NodeErr<'_>,
+    entry_err: EntryErr<'_>,
+) -> Result<(String, Vec<String>), crate::sheet::SheetError> {
+    let given = args(node);
+    let [other] = given.as_slice() else {
+        return Err(node_err(
+            node,
+            "`from` takes the part to play, such as `from \"Keys\" voice=\"bass\"`".into(),
+        ));
+    };
+    let other = string(other, "a part's name", entry_err)?.to_string();
+    let mut voices = Vec::new();
+    for (k, e) in props(node) {
+        match k {
+            "voice" => {
+                voices = string(e, "`voice`", entry_err)?
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+            }
+            other => {
+                return Err(entry_err(e, format!("`from` has `voice`, not `{other}`")));
+            }
+        }
+    }
+    Ok((other, voices))
 }
 
 fn read_top(

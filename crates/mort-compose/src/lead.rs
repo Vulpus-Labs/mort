@@ -463,7 +463,7 @@ fn block(s: &Step<'_>, v: &Voicing) -> Block {
 
 /// Whether `b` follows `a` directly: the next harmony in the same section,
 /// or the first of the next section.
-fn adjacent(sheet: &Sheet, a: &Block, b: &Block) -> bool {
+pub(crate) fn adjacent(sheet: &Sheet, a: &Block, b: &Block) -> bool {
     if a.section == b.section {
         return a.start + a.length == b.start;
     }

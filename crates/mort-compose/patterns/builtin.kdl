@@ -1,0 +1,106 @@
+// mort's built-in articulation patterns and drum kit maps (ADR 0013 §8).
+//
+// A pattern turns voiced blocks into notes. It repeats every `bars`
+// bars, counted from the start of each section, and runs across chord
+// changes: each hit takes the notes of the block sounding when it falls.
+// Patterns in the user's or the project's `patterns/` directory replace
+// these by name.
+//
+//   pattern NAME bars=N drums=#true|#false nct="skip"|"sound" {
+//       description "…"
+//       hand NAME span=N       A hand that strikes notes together can
+//                              reach N semitones (16, a tenth, if unset).
+//       hit SELECT… at="POSITIONS" length=BEATS velocity=N accent=#true
+//           octave=N double=N… hand=NAME anticipate=#true
+//       arp ORDER every=BEATS velocity=N
+//       walk approach="chromatic"|"scale" velocity=N
+//   }
+//
+// SELECT picks notes by voice (bass, inner, inner1…, top, all) and by
+// role (root 2nd 3rd 4th 5th 6th 7th 9th 11th 13th tension): a note is
+// taken if it matches any voice given and any role given. In a drum
+// pattern, SELECT names kit pieces instead.
+//
+// POSITIONS are beats from 1: `1`, `2&` (the and of 2), `3e` and `3a`
+// (sixteenths), `2.5`, and `2:4&` for bar 2 of the pattern; or `change`,
+// once at the start of every harmony. A hit lasts until the line's next
+// position unless `length` says otherwise, and never past the block it
+// plays. `anticipate` takes the next block's notes, as the push on the
+// and of 4 does. `octave` moves the notes; `double` adds copies that
+// many semitones away. With `nct="sound"`, non-chord tones sound when
+// they are current; by default only chord tones do.
+//
+// `arp` plays the block's notes one at a time: up, down or updown.
+// `walk` plays a walking line, a note a beat, from each block's bass
+// towards the next, approaching it chromatically or by a scale step.
+//
+// A kit maps piece names to MIDI notes for a drum instrument:
+//
+//   kit NAME { piece NAME NOTE … }
+
+kit "gm" {
+    description "General MIDI percussion, channel 10 note numbers."
+    piece "kick" 36
+    piece "side_stick" 37
+    piece "snare" 38
+    piece "clap" 39
+    piece "hat_closed" 42
+    piece "hat_pedal" 44
+    piece "hat_open" 46
+    piece "tom_low" 45
+    piece "tom_mid" 47
+    piece "tom_high" 50
+    piece "crash" 49
+    piece "ride" 51
+    piece "tambourine" 54
+    piece "cowbell" 56
+    piece "shaker" 70
+}
+
+pattern "sustain" {
+    description "Every voice held for the whole harmony."
+    hit "all" at="change"
+}
+
+pattern "block" {
+    description "Every voice struck on each beat."
+    hit "all" at="1 2 3 4" length=0.9
+}
+
+pattern "arpeggio up" {
+    description "The block's notes one at a time, rising, in eighths."
+    arp "up" every=0.5
+}
+
+pattern "arpeggio down" {
+    description "The block's notes one at a time, falling, in eighths."
+    arp "down" every=0.5
+}
+
+pattern "bossa piano" bars=2 {
+    description "Left hand: the bass in octaves on 1 and 3. Right hand: the upper voices in a syncopated two-bar figure, pushing the next chord on the and of 4."
+    hand "left" span=16
+    hand "right" span=16
+    hit "bass" at="1 3 2:1 2:3" length=1.5 double=-12 hand="left"
+    hit "inner top" at="1 2& 2:2 2:3&" length=0.5 hand="right"
+    hit "inner top" at="2:4&" length=0.5 hand="right" anticipate=#true accent=#true
+}
+
+pattern "walking" {
+    description "A walking bass line, a note a beat, approaching each change by a semitone."
+    walk approach="chromatic"
+}
+
+pattern "rock drums" drums=#true {
+    description "Kick on 1 and 3, snare on 2 and 4, closed hats in eighths."
+    hit "kick" at="1 3"
+    hit "snare" at="2 4" accent=#true
+    hit "hat_closed" at="1 1& 2 2& 3 3& 4 4&" velocity=70
+}
+
+pattern "bossa drums" drums=#true bars=2 {
+    description "Bossa nova: kick on 1, 2&, 3, 4&; side stick on a two-bar clave; closed hats in eighths."
+    hit "kick" at="1 2& 3 4& 2:1 2:2& 2:3 2:4&" velocity=80
+    hit "side_stick" at="1 2& 4 2:2& 2:4"
+    hit "hat_closed" at="1 1& 2 2& 3 3& 4 4& 2:1 2:1& 2:2 2:2& 2:3 2:3& 2:4 2:4&" velocity=60
+}
