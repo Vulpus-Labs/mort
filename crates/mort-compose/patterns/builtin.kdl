@@ -104,3 +104,15 @@ pattern "bossa drums" drums=#true bars=2 {
     hit "side_stick" at="1 2& 4 2:2& 2:4"
     hit "hat_closed" at="1 1& 2 2& 3 3& 4 4& 2:1 2:1& 2:2 2:2& 2:3 2:3& 2:4 2:4&" velocity=60
 }
+
+pattern "bossa bass" {
+    description "The surdo's two-feel: the root on 1, the fifth below pushed in on the and of 2 and held. Voice it with `root fifth`."
+    hit "bass" at="1" length=1.5 velocity=100
+    hit "top" at="2&" length=2.5 octave=-1 velocity=88
+}
+
+pattern "bossa comp" bars=2 {
+    description "Bossa comping for a band with a bass: every voice on a syncopated two-bar figure, pushing the next chord on the and of 4. No left-hand bass."
+    hit "all" at="1 2& 2:2 2:3&" length=0.5 velocity=78
+    hit "all" at="2:4&" length=0.75 anticipate=#true velocity=92
+}

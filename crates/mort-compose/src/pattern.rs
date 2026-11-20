@@ -750,6 +750,8 @@ mod tests {
                 "arpeggio down",
                 "arpeggio up",
                 "block",
+                "bossa bass",
+                "bossa comp",
                 "bossa drums",
                 "bossa piano",
                 "rock drums",

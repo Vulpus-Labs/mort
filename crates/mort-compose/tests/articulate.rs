@@ -300,3 +300,28 @@ fn pattern_errors_say_where() {
     let e = sheet::parse("part \"B\" {\n    from \"Keys\"\n}\n").unwrap_err();
     assert!(e.message.contains("`from` part `Keys`"), "{e}");
 }
+
+#[test]
+fn bossa_bass_plays_root_then_the_fifth_below() {
+    let s = sheet(
+        r#"
+        section "a" bars=2 {
+            harmony "Dm9" "A7alt" bars=1
+        }
+        part "Bass" {
+            voicing "root fifth" voices=2 range="A1..D3"
+            articulation "bossa bass" range="E1..G3"
+        }
+        "#,
+    );
+    let p = play(&s, "Bass");
+    let notes: Vec<(u32, u8)> = p.events.iter().map(|e| (e.start, e.pitch)).collect();
+    // Dm9: D on 1, A below on the and of 2. A7alt has no fifth: its 3rd,
+    // C#, an octave down.
+    assert_eq!(notes.len(), 4, "{notes:?}");
+    assert_eq!(notes[0].1 % 12, 2);
+    assert_eq!((notes[1].0, notes[1].1 % 12), (BEAT + BEAT / 2, 9));
+    assert!(notes[1].1 < notes[0].1, "the fifth is below the root");
+    assert_eq!((notes[2].1 % 12, notes[3].1 % 12), (9, 1));
+    assert!(p.problems.is_empty(), "{:?}", p.problems);
+}

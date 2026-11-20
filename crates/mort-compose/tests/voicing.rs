@@ -184,6 +184,8 @@ fn every_builtin_builds_something() {
         ("so what", "D dorian", 5),
         ("spread", "Cmaj9", 5),
         ("upper structure", "G7#11", 5),
+        ("root fifth", "A7alt", 2),
+        ("guide tones", "G13", 3),
     ];
     for (name, harmony, voices) in cases {
         let vs = v

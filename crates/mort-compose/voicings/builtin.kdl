@@ -114,3 +114,18 @@ voicing "cluster" {
     description "Neighbouring available notes a tone or semitone apart."
     step 1 2
 }
+
+voicing "root fifth" {
+    description "The root in the bass and the fifth above it (the 3rd or 7th when there is no fifth): a bass part's two anchors."
+    chord "5th" "3rd" "7th"
+    bass "root"
+    layout "close"
+    voices 2
+}
+
+voicing "guide tones" {
+    description "The 3rd and 7th, with the 9th or 13th as a third voice: a line that moves by step and leaves room for other parts."
+    chord "3rd" "4th" "7th" "6th" "9th" "13th" "5th" tensions=#true
+    layout "close"
+    voices 2 3
+}

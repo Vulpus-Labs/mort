@@ -1,21 +1,28 @@
-// The E004 proof (ticket 0029): a modal verse and a chorus of changes.
+// The E004 proof (ticket 0029), second arrangement.
+// The verse is a dorian vamp (i - IV), the chorus a run of changes.
 section "verse" bars=8 {
-    harmony "D dorian" bars=8
+    harmony "Dm9" "G13" "Dm9" "G13" "Dm9" "G13" "Dm9" "G13" bars=1
 }
 section "chorus" bars=8 {
     harmony "Gm9" "C13" "Fmaj9" "Bbmaj7#11" "Gm9" "C13" "Fmaj9" "A7alt" bars=1
 }
-part "Pad" {
-    voicing "quartal" voices=4 range="C3..A4"
-}
+// Keys first: the other parts are voiced against them.
 part "Keys" {
-    voicing "drop-2" voices=4 range="G3..D5"
-    articulation "bossa piano"
+    voicing "drop-2" voices=4 range="F3..C5"
+    articulation "bossa comp"
+    feel timing=6 velocity=10 seed=2
 }
 part "Bass" {
-    from "Keys" voice="bass"
-    articulation "walking" range="E1..G3"
+    voicing "root fifth" voices=2 range="A1..D3"
+    articulation "bossa bass" range="E1..G3"
+    feel timing=4 velocity=6 seed=1
+}
+// Guide tones above the keys, held for each chord.
+part "Pad" {
+    voicing "guide tones" voices=3 range="A4..C6"
+    feel velocity=4 seed=3
 }
 part "Drums" {
     articulation "bossa drums" kit="reasyndr"
+    feel timing=5 velocity=12 seed=4
 }
