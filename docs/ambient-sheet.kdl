@@ -1,41 +1,72 @@
-// An ambient piece in D lydian, about three minutes at 70 bpm.
+// An ambient piece in D aeolian, about three minutes at 70 bpm.
+//
+// The cycle: i7 - VImaj7sus2 - IIImaj7 - VIIsus4 - VII - VIIsus2, six bars.
+// Dm7's 7th (C) is held into Bbmaj7sus2 as its 2nd; Csus4's 4th (F)
+// resolves to E, then falls to D, the sus2, which is the next Dm7's root.
+// Every harmony is pinned to D aeolian, so tensions and passing notes are
+// diatonic.
 section "intro" bars=8 {
-    harmony "D lydian" bars=8
+    harmony "D aeolian" bars=8
 }
 section "a" bars=12 {
-    harmony "Dmaj9" "Bm11" "Gmaj7#11" bars=4
+    harmony "Dm7" bars=2 scale="D aeolian"
+    harmony "Bbmaj7sus2" "Fmaj7" "Csus4" bars=1 scale="D aeolian"
+    harmony "C" "Csus2" beats=2 scale="D aeolian"
+    harmony "Dm7" bars=2 scale="D aeolian"
+    harmony "Bbmaj7sus2" "Fmaj7" "Csus4" bars=1 scale="D aeolian"
+    harmony "C" "Csus2" beats=2 scale="D aeolian"
 }
 section "b" bars=12 {
-    harmony "Em9" "Cmaj7#11" "Gmaj9/B" bars=4
+    harmony "Dm9" bars=2 scale="D aeolian"
+    harmony "Bbmaj7sus2" "Fmaj9" "Csus4" bars=1 scale="D aeolian"
+    harmony "C" "Csus2" beats=2 scale="D aeolian"
+    harmony "Dm9" bars=2 scale="D aeolian"
+    harmony "Bbmaj7sus2" "Fmaj9" "Csus4" bars=1 scale="D aeolian"
+    harmony "C" "Csus2" beats=2 scale="D aeolian"
 }
 section "c" bars=12 {
-    harmony "Bb lydian" bars=6
-    harmony "D lydian" bars=6
+    harmony "Dm9" bars=2 scale="D aeolian"
+    harmony "Bbmaj7sus2" "Fmaj9" "Csus4" bars=1 scale="D aeolian"
+    harmony "C" "Csus2" beats=2 scale="D aeolian"
+    harmony "Dm11" bars=2 scale="D aeolian"
+    harmony "Bbmaj7sus2" "Fmaj9" "Csus4" bars=1 scale="D aeolian"
+    harmony "C" "Csus2" beats=2 scale="D aeolian"
 }
 section "outro" bars=8 {
-    harmony "Dmaj9" bars=8
+    harmony "Dm7" bars=4 scale="D aeolian"
+    harmony "Bbmaj7sus2" bars=2 scale="D aeolian"
+    harmony "Dm9" bars=2 scale="D aeolian"
 }
 
-// A D pedal under everything, with each harmony's fifth above it. The
-// instrument is set to 16', so it sounds an octave lower than written.
+// A D pedal under everything (root of Dm, 3rd of Bb, 6th of F, 9th of
+// C), with each harmony's fifth above it. 16': sounds an octave down.
 part "Drone" {
     voicing "root fifth" voices=2 range="D2..A3"
     pedal "D2"
 }
-// Open quartal voicings, held, with slow suspensions over the changes.
+// Close voicings, so each voice's step is heard, with passing notes and
+// suspensions between them.
 part "Pad" {
-    voicing "quartal" voices=4 range="G3..C6"
-    nct "suspension" beats=2
+    voicing "close" voices=4 range="A3..E5"
+    nct "suspension" "passing" beats=1
+    // Dm7's C held, in the same voice, as Bbmaj7sus2's 2nd.
+    fix "a" bar=1 "C4 D4 F4 A4"
+    fix "a" bar=3 "C4 F4 A4 Bb4"
+    fix "a" bar=9 "C4 F4 A4 Bb4"
+    fix "b" bar=3 "C4 F4 A4 Bb4"
+    fix "b" bar=9 "C4 F4 A4 Bb4"
+    fix "c" bar=3 "C4 F4 A4 Bb4"
+    fix "c" bar=9 "C4 F4 A4 Bb4"
     feel velocity=3 seed=1
 }
-// Sparse high notes (4', an octave above written), loosely timed.
+// A slow arpeggio over the guide tones and a tension.
 part "Glass" {
     in "b" "c" "outro"
-    voicing "quartal" voices=3 range="C4..G5"
-    articulation "glints"
-    feel timing=24 velocity=8 seed=2
+    voicing "guide tones" voices=3 range="D4..D6"
+    articulation "drift"
+    feel timing=18 velocity=8 seed=2
 }
-// A soft heartbeat on the root (16').
+// A soft heartbeat on each root (16').
 part "Pulse" {
     in "a" "b" "c"
     voicing "root fifth" voices=2 range="D2..A3"

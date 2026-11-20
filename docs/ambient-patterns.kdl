@@ -11,3 +11,8 @@ pattern "glints" bars=4 {
     hit "inner" at="2:3&" length=2 velocity=50
     hit "bass" at="3:2" length=2 velocity=46
 }
+
+pattern "drift" {
+    description "A slow arpeggio, up and down, a note a beat."
+    arp "updown" every=1 velocity=48
+}
