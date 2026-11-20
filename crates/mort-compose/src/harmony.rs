@@ -727,7 +727,11 @@ mod tests {
         let h = Harmony::parse("Csus2", Some("D aeolian")).unwrap();
         assert_eq!(h.spell(p("E4")), "E4");
         let h = Harmony::parse("G7#9", None).unwrap();
-        assert_eq!(h.role_of(p("A#4").class()), Some(Role::Tension(9)), "with a 3rd, it stays a #9");
+        assert_eq!(
+            h.role_of(p("A#4").class()),
+            Some(Role::Tension(9)),
+            "with a 3rd, it stays a #9"
+        );
     }
 
     #[test]
