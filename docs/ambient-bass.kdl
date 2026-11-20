@@ -12,7 +12,7 @@ set Bass Kritter Reso 0.1 normalised=#true
 set Bass Kritter Env 0.15 normalised=#true
 set Bass Kritter Attack 0.35 normalised=#true
 set Bass Kritter Sustain 1 normalised=#true
-set Bass Kritter Decay 0.45 normalised=#true
+set Bass Kritter Decay 1 normalised=#true
 set Bass Kritter "Chorus On" 0 normalised=#true
 set Bass Kritter "Reverb On" 0 normalised=#true
 set Bass Kritter Gain 0.5 normalised=#true
@@ -21,3 +21,7 @@ commit
 send set Bass Space volume=-20
 track set Bass volume=-12
 commit
+// Poly-Kritter does not retrigger its envelope when one note follows
+// another with no gap, so a finite Decay faded the first note and left
+// the rest silent. Decay at inf holds each note while it is down.
+automate Bass volume "45.1=0" "53.1=-60" shape=slow
