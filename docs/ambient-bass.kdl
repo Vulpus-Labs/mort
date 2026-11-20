@@ -1,0 +1,23 @@
+// A plain bass to carry the chord motion: one held root per chord.
+track add Bass
+commit
+fx add Bass "silkscreen Poly-Kritter"
+commit
+set Bass Kritter Wave 0.5 normalised=#true
+set Bass Kritter Scale 0.5 normalised=#true
+set Bass Kritter Select 0 normalised=#true
+set Bass Kritter Balance 0 normalised=#true
+set Bass Kritter "Low Pass" 0.52 normalised=#true
+set Bass Kritter Reso 0.1 normalised=#true
+set Bass Kritter Env 0.15 normalised=#true
+set Bass Kritter Attack 0.35 normalised=#true
+set Bass Kritter Sustain 1 normalised=#true
+set Bass Kritter Decay 0.45 normalised=#true
+set Bass Kritter "Chorus On" 0 normalised=#true
+set Bass Kritter "Reverb On" 0 normalised=#true
+set Bass Kritter Gain 0.5 normalised=#true
+send add Bass Space
+commit
+send set Bass Space volume=-20
+track set Bass volume=-12
+commit

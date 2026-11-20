@@ -77,3 +77,11 @@ part "Pulse" {
 part "Hiss" {
     voicing "close" voices=1 range="C4..C5"
 }
+// A plain bass: each chord's root, held for the chord, so the motion
+// D - Bb - F - C is heard under the drone's D. One voice in Bb1..A2, so
+// each root has one place to go.
+part "Bass" {
+    in "a" "b" "c" "outro"
+    voicing "close" voices=1 range="Bb1..A2"
+    feel velocity=4 seed=5
+}
