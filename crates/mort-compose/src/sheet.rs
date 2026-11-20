@@ -21,6 +21,7 @@ use std::fmt;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::harmony::Harmony;
+use crate::source::{args, line_col, parse_kdl, props};
 
 /// Ticks per quarter note, as REAPER's MIDI uses by default.
 pub const TICKS_PER_QUARTER: u32 = 960;
@@ -179,24 +180,14 @@ impl std::error::Error for SheetError {}
 /// [`SheetError`] with the line and column of the first problem.
 pub fn parse(src: &str) -> Result<Sheet, SheetError> {
     let at = |offset: usize, message: String| {
-        let before = src.get(..offset).unwrap_or(src);
+        let (line, column) = line_col(src, offset);
         SheetError {
-            line: before.matches('\n').count() + 1,
-            column: before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1,
+            line,
+            column,
             message,
         }
     };
-    let doc: KdlDocument = src.parse().map_err(|e: kdl::KdlError| {
-        let d = e.diagnostics.first();
-        at(
-            d.map_or(0, |d| d.span.offset()),
-            format!(
-                "this is not KDL: {}",
-                d.and_then(|d| d.message.clone().or_else(|| d.label.clone()))
-                    .unwrap_or_else(|| "it does not parse".into())
-            ),
-        )
-    })?;
+    let doc = parse_kdl(src).map_err(|(o, m)| at(o, m))?;
     let node_err = |n: &KdlNode, m: String| at(n.span().offset(), m);
     let entry_err = |e: &KdlEntry, m: String| at(e.span().offset(), m);
 
@@ -240,17 +231,6 @@ pub fn parse(src: &str) -> Result<Sheet, SheetError> {
         }
     }
     Ok(sheet)
-}
-
-fn args(n: &KdlNode) -> Vec<&KdlEntry> {
-    n.entries().iter().filter(|e| e.name().is_none()).collect()
-}
-
-fn props(n: &KdlNode) -> Vec<(&str, &KdlEntry)> {
-    n.entries()
-        .iter()
-        .filter_map(|e| e.name().map(|k| (k.value(), e)))
-        .collect()
 }
 
 fn meter_of(e: &KdlEntry) -> Result<Meter, String> {

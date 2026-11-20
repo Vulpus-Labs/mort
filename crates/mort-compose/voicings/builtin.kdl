@@ -1,0 +1,116 @@
+// mort's built-in voicing vocabularies (ADR 0013 §5).
+//
+// A vocabulary builds candidate voicings for a harmony, a range and a
+// number of voices. Voice-leading then chooses among them. A vocabulary
+// in the user's or the project's `voicings/` directory with the same
+// name replaces one of these.
+//
+// Each `voicing` holds one way of building:
+//
+//   chord ROLE…      Pick chord tones by role, in this order of
+//                    preference, until there are enough voices. Roles:
+//                    root 2nd 3rd 4th 5th 6th 7th 9th 11th 13th tension.
+//                    `tensions=#true` lets it pick the harmony's available
+//                    tensions too, not only the notes of the symbol.
+//     double ROLE…   With too few roles, double these, in order.
+//     layout L       close (every inversion), drop2, drop3 or drop24.
+//     bass ROLE      Put this role alone at the bottom, at least `gap`
+//                    semitones below the rest.
+//   step N…          Stack notes, each step N semitones above the last
+//                    (any of the Ns), as many as there are voices. Every
+//                    note must be available in the harmony.
+//   steps N…         A fixed stack; give several `steps` for
+//                    alternatives. The voice count is one more than the
+//                    number of steps.
+//   lower { … }      Two layers, each built as above: the upper sits
+//   upper { … }      wholly above the lower. `voices` in `lower` says how
+//                    many voices it takes; `upper` takes the rest.
+//
+// and, for any of them:
+//
+//   voices N…        The voice counts it allows.
+//   from ROLE…       For `step`/`steps`: the roles the bottom note may be.
+//   require ROLE…    Keep only voicings holding every one of these roles,
+//                    or, with `count=N`, at least N notes of any of them.
+//   description "…"  What it is for.
+
+voicing "close" {
+    description "Chord tones in close position, every inversion."
+    chord "root" "3rd" "5th" "7th" "6th" "4th" "2nd" "9th" "13th" "11th"
+    double "root" "5th" "3rd"
+    layout "close"
+}
+
+voicing "drop-2" {
+    description "Close position with the second voice from the top dropped an octave."
+    chord "3rd" "7th" "6th" "root" "5th" "4th" "2nd" "9th" "13th" "11th"
+    double "root" "5th"
+    layout "drop2"
+    voices 4 5
+}
+
+voicing "drop-3" {
+    description "Close position with the third voice from the top dropped an octave."
+    chord "3rd" "7th" "6th" "root" "5th" "4th" "2nd" "9th" "13th" "11th"
+    double "root" "5th"
+    layout "drop3"
+    voices 4 5
+}
+
+voicing "shell" {
+    description "Root in the bass with the 3rd and 7th (or 6th) above: the guide tones."
+    chord "3rd" "4th" "2nd" "7th" "6th" "5th"
+    bass "root"
+    layout "close"
+    voices 3
+}
+
+voicing "rootless" {
+    description "No root: guide tones with the 9th and 13th (or 5th), for comping over a bass part."
+    chord "3rd" "4th" "7th" "6th" "9th" "13th" "5th" "11th" tensions=#true
+    layout "close"
+    require "3rd" "7th" count=1
+    voices 3 4 5
+}
+
+voicing "spread" {
+    description "Root alone low, the rest in drop-2 at least a fifth above it."
+    chord "3rd" "7th" "6th" "5th" "9th" "13th" "11th" "4th" "2nd" tensions=#true
+    double "5th"
+    bass "root" gap=7
+    layout "drop2"
+    voices 4 5 6
+}
+
+voicing "quartal" {
+    description "Stacked perfect fourths, every note available in the harmony."
+    step 5
+}
+
+voicing "so what" {
+    description "Three perfect fourths and a major third, as in Bill Evans's voicing on So What."
+    steps 5 5 5 4
+}
+
+voicing "upper structure" {
+    description "The 3rd and 7th below, and a major or minor triad of mostly tensions above."
+    lower {
+        chord "3rd" "7th"
+        layout "close"
+        voices 2
+    }
+    upper {
+        steps 4 3
+        steps 3 5
+        steps 5 4
+        steps 3 4
+        steps 4 5
+        steps 5 3
+        require "tension" count=2
+    }
+}
+
+voicing "cluster" {
+    description "Neighbouring available notes a tone or semitone apart."
+    step 1 2
+}

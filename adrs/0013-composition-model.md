@@ -101,6 +101,25 @@ modal writing works from a scale held over several bars.
    project's (`<project>.mort/voicings/`) are added to them and override
    built-ins of the same name. Adding a vocabulary needs no new release.
 
+   A vocabulary builds in one of four ways (ticket 0025; the format is
+   documented at the top of `mort-compose/voicings/builtin.kdl`):
+   - `chord`: chord tones by role in order of preference, doubled if
+     too few, arranged close, drop-2, drop-3 or drop-2-and-4, with a
+     role alone in the bass if asked. Notes the symbol names are
+     picked before the scale's tensions, so `Dm9` gives F A C E.
+   - `step`: a stack in which each step is one of the given intervals
+     (quartal is `step 5`, clusters `step 1 2`).
+   - `steps`: fixed stacks, as alternatives ("So What" is `steps 5 5 5
+     4`).
+   - `lower` and `upper`: two layers, the upper wholly above the lower
+     (upper-structure triads).
+
+   `voices` limits the voice counts, `from` the bottom note's role, and
+   `require` keeps only voicings holding given roles. Every note must
+   be available in the harmony (a chord tone or a tension, never an
+   avoid note). The built-ins also include `rootless`, for comping over
+   a separate bass part.
+
 6. **Voice-leading** chooses one candidate per harmony change, so that
    the whole sequence costs least. The search is Viterbi over the
    candidates.
