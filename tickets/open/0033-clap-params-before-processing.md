@@ -16,6 +16,11 @@ applied it). REAPER queues the change for the plugin's next process or
 flush. A script that sets and then reads, or an agent that checks its
 work, sees the wrong value.
 
+Undo is affected too. Undoing a later MIDI write on the Bass track set
+Poly-Kritter's `Sustain` back to Off, though it had been set On several
+edits earlier. REAPER's undo snapshot seems to hold the plugin's state
+from before the queued changes were applied.
+
 ## Acceptance criteria
 
 - [ ] Find out in REAPER whether the value is only reported stale or not
@@ -25,3 +30,5 @@ work, sees the wrong value.
       the plugin to flush, or by reading back through the same path. If
       neither is possible, `fx.params` says which values are pending.
 - [ ] Smoke check: set a CLAP parameter while stopped, then read it.
+- [ ] Smoke check: set a CLAP parameter, make a MIDI edit, undo the MIDI
+      edit; the parameter keeps its value.

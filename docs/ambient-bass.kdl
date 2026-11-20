@@ -21,7 +21,10 @@ commit
 send set Bass Space volume=-20
 track set Bass volume=-12
 commit
-// Poly-Kritter does not retrigger its envelope when one note follows
-// another with no gap, so a finite Decay faded the first note and left
-// the rest silent. Decay at inf holds each note while it is down.
+// Decay at inf holds each note while it is down. With a finite decay the
+// bass hit a Poly-Kritter bug: a note that starts on the tick another ends
+// does not sound if the earlier note's envelope has already decayed to
+// silence while held (measured in REAPER 7.67; Legato off, Mode poly,
+// Stop on or off alike; a gap of a beat avoids it). The held bass notes
+// last up to two bars, longer than a 0.9 s decay.
 automate Bass volume "45.1=0" "53.1=-60" shape=slow
