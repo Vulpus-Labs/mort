@@ -451,6 +451,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mort-compose"
+version = "0.1.0"
+dependencies = [
+ "kdl",
+]
+
+[[package]]
 name = "mort-features"
 version = "0.1.0"
 dependencies = [

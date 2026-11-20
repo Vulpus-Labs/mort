@@ -72,12 +72,21 @@ modal writing works from a scale held over several bars.
 4. **Harmony.** At each moment the harmony gives a root, a scale or
    mode, the chord tones, the available tensions and the avoid notes.
    - A chord symbol implies a default scale (`m7` → Dorian, `maj7#11`
-     → Lydian), from a table. The default can be overridden in the
-     sheet.
+     → Lydian). Each chord family (major, dominant, minor, and so on)
+     has a list of scales in order of preference, each with its reason.
+     The chord takes the first scale that holds every note its symbol
+     asks for, so the alterations choose: `G7` is Mixolydian, `G7b9`
+     half-whole diminished, `G7b9b13` Phrygian dominant. The sheet can
+     name a scale instead (`scale="aeolian"`, or a root and scale). Chord
+     tones outside a named scale are allowed and stay chord tones.
    - A bare scale or mode ("D dorian for 8 bars") is a harmony in its
-     own right, with no chord symbol.
-   - The chord-symbol grammar and the default-scale table are data in
-     the crate, with tests.
+     own right, with no chord symbol. Its chord tones are its own 1st,
+     3rd, 5th and 7th notes. Scales with other than seven notes take the
+     nearest notes they have.
+   - Avoid notes are scale notes a semitone above a chord tone. The
+     other scale notes are the available tensions.
+   - The chord-symbol grammar and the default-scale lists are data in
+     the crate, with tests (ticket 0024).
 
 5. **Voicing vocabularies are data.** A vocabulary is a rule for
    building candidate note stacks from a harmony. Examples:
@@ -108,7 +117,8 @@ modal writing works from a scale held over several bars.
 7. **Blocks** are sustained sonorities with a start and a length. Every
    note in a block carries two labels:
    - **its voice:** `bass`, `inner1`…`innerN`, `top`;
-   - **its role:** `root`, `3rd`, `5th`, `7th`, `tension`, or a
+   - **its role:** `root`, `3rd` (or `2nd`/`4th` in sus chords), `5th`,
+     `6th` or `7th`, a tension by degree (`9th`, `11th`, `13th`), or a
      non-chord tone (`passing`, `neighbour`, `suspension`,
      `anticipation`, `pedal`).
 
@@ -186,8 +196,9 @@ modal writing works from a scale held over several bars.
   - audio parts;
   - analysing existing MIDI back into blocks (useful for reharmonising a
     part played by hand, but a separate decision).
-- Open until the first ticket: the sheet's exact syntax, the
-  chord-symbol grammar, the default cost weights (to be set by listening
-  to the output, in the spirit of ADR 0007 §3), and whether the
-  walking-bass line belongs in voicing (as a line generator with
-  approach notes) or in articulation.
+- Settled in ticket 0024: the chord-symbol grammar, and the sheet's
+  syntax for form and harmony (`meter`, `section`, `harmony`). Still
+  open: the sheet's syntax for parts, the default cost weights (to be
+  set by listening to the output, in the spirit of ADR 0007 §3), and
+  whether the walking-bass line belongs in voicing (as a line generator
+  with approach notes) or in articulation.
