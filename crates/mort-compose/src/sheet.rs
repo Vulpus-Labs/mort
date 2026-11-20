@@ -21,6 +21,7 @@ use std::fmt;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::harmony::Harmony;
+use crate::part::{Part, parse_part};
 use crate::source::{args, line_col, parse_kdl, props};
 
 /// Ticks per quarter note, as REAPER's MIDI uses by default.
@@ -140,6 +141,8 @@ impl Section {
 pub struct Sheet {
     /// The sections, in the order of the form.
     pub sections: Vec<Section>,
+    /// The parts.
+    pub parts: Vec<Part>,
 }
 
 impl Sheet {
@@ -147,6 +150,12 @@ impl Sheet {
     #[must_use]
     pub fn section(&self, name: &str) -> Option<&Section> {
         self.sections.iter().find(|s| s.name == name)
+    }
+
+    /// The part named `name`.
+    #[must_use]
+    pub fn part(&self, name: &str) -> Option<&Part> {
+        self.parts.iter().find(|p| p.name == name)
     }
 }
 
@@ -204,6 +213,7 @@ pub fn parse(src: &str) -> Result<Sheet, SheetError> {
     }
 
     let mut sheet = Sheet::default();
+    let mut parts = Vec::new();
     for n in doc.nodes() {
         match n.name().value() {
             "meter" => {}
@@ -220,15 +230,49 @@ pub fn parse(src: &str) -> Result<Sheet, SheetError> {
                 }
                 sheet.sections.push(s);
             }
+            "part" => {
+                let p = parse_part(n, &node_err, &entry_err)?;
+                if parts
+                    .iter()
+                    .any(|(_, q): &(&KdlNode, Part)| q.name == p.name)
+                {
+                    return Err(node_err(
+                        n,
+                        format!("there are two parts named `{}`", p.name),
+                    ));
+                }
+                parts.push((n, p));
+            }
             other => {
                 return Err(node_err(
                     n,
                     format!(
-                        "`{other}` is not a sheet node; a sheet holds `meter` and `section` nodes"
+                        "`{other}` is not a sheet node; a sheet holds `meter`, `section` and `part` nodes"
                     ),
                 ));
             }
         }
+    }
+    // Parts may come before the sections they name, so check names last.
+    for (n, p) in parts {
+        let named = p
+            .sections
+            .iter()
+            .chain(p.overrides.keys())
+            .chain(p.tops.iter().map(|t| &t.section))
+            .chain(p.fixes.iter().map(|f| &f.section));
+        for s in named {
+            if sheet.section(s).is_none() {
+                return Err(node_err(
+                    n,
+                    format!(
+                        "part `{}` names section `{s}`, which the sheet does not have",
+                        p.name
+                    ),
+                ));
+            }
+        }
+        sheet.parts.push(p);
     }
     Ok(sheet)
 }

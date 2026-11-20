@@ -126,10 +126,19 @@ modal writing works from a scale held over several bars.
    - **Hard constraints:** each voice's range, the voice count, a melody
      note required in the top voice, and literal voicings given in the
      sheet for particular bars.
-   - **Soft costs, with weights in the part's spec:** total movement,
-     leaps per voice, common tones kept, low-interval spacing (no thirds
-     below about E2), parallel fifths and octaves, and voice crossing.
-   - Ties are broken in a fixed order, so the result is deterministic.
+   - **Soft costs, with weights in the part's spec:**
+     - total movement;
+     - leaps beyond a major third;
+     - common tones kept (a bonus);
+     - low-interval spacing, from the usual arranging limits (a minor
+       third no lower than C3, a fifth no lower than B♭1);
+     - parallel fifths and octaves;
+     - voice crossing and overlap;
+     - distance from the middle of the range.
+   - The path runs through every harmony the part plays, in form order,
+     across section boundaries. It restarts where the voice count
+     changes.
+   - Ties go to the earlier candidate, so the result is deterministic.
    - When no candidate meets the hard constraints, the error names the
      section, bar and constraint, and suggests what to relax.
 
@@ -141,10 +150,25 @@ modal writing works from a scale held over several bars.
      non-chord tone (`passing`, `neighbour`, `suspension`,
      `anticipation`, `pedal`).
 
-   Voice-leading may add non-chord tones between blocks: a passing tone
-   filling a third, a suspension held over a change. This is switched on
-   per part. Such tones are labelled, never left out, and articulation
-   decides whether to sound them (§8).
+   Voice-leading may add non-chord tones between blocks. This is
+   switched on per part (`nct`, in order of preference, lasting a beat
+   unless `beats=` says otherwise, at most half a block). The tones go
+   in the inner and top voices, each voice taking the first kind that
+   fits (ticket 0026):
+   - passing: a scale step filling a third;
+   - neighbour: the next scale step above a held note;
+   - suspension: the previous note held into a harmony where it is not
+     a chord tone but is in the scale, falling a step;
+   - anticipation: the next note played early.
+
+   A `pedal` replaces the bass voice with a held note. Such tones are
+   labelled, never left out, and articulation decides whether to sound
+   them (§8).
+
+   **Walking bass is articulation, not voicing** (ticket 0026). A
+   walking line is rhythmic, a note a beat. It chooses approach notes
+   from where the next block's bass goes, and articulation sees both
+   blocks. Voicing gives it the bass voice and the harmony.
 
 8. **Articulation and performance patterns are data too:**
    - A pattern is a grid of *hits*, one or more bars long, anchored to
@@ -217,7 +241,7 @@ modal writing works from a scale held over several bars.
     part played by hand, but a separate decision).
 - Settled in ticket 0024: the chord-symbol grammar, and the sheet's
   syntax for form and harmony (`meter`, `section`, `harmony`). Still
-  open: the sheet's syntax for parts, the default cost weights (to be
-  set by listening to the output, in the spirit of ADR 0007 §3), and
-  whether the walking-bass line belongs in voicing (as a line generator
-  with approach notes) or in articulation.
+  open: the default cost weights (to be set by listening to the
+  output, in the spirit of ADR 0007 §3). Ticket 0026 settled the
+  sheet's syntax for parts (`part` in the module doc of
+  `mort_compose::part`), and put walking bass in articulation.

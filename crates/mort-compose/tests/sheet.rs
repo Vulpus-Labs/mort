@@ -104,7 +104,7 @@ fn errors_say_where_and_what_to_do() {
     assert!(
         error("section \"v\" bars=2\nsection \"v\" bars=2\n").contains("two sections named `v`")
     );
-    assert!(error("part \"Pad\"\n").contains("`part` is not a sheet node"));
+    assert!(error("groove \"bossa\"\n").contains("`groove` is not a sheet node"));
     assert!(
         error("section \"v\" bars=1 {\n harmony \"C\" bars=1 beats=4\n}\n").contains("not both")
     );
