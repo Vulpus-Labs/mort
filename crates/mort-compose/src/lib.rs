@@ -12,7 +12,8 @@
 //! - [`lead`]: voice-leading, which turns a part into labelled blocks;
 //! - [`pattern`]: articulation patterns and drum kit maps;
 //! - [`articulate`]: blocks played through a pattern, with feel, as
-//!   note events.
+//!   note events;
+//! - [`record`]: what `mort compose write` wrote, and what to write next.
 //! - [`voicing`]: voicing vocabularies and the candidate voicings they
 //!   build for a harmony.
 
@@ -24,6 +25,7 @@ pub mod part;
 pub mod pattern;
 mod perform;
 pub mod pitch;
+pub mod record;
 pub mod scale;
 pub mod sheet;
 mod source;

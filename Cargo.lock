@@ -445,6 +445,7 @@ dependencies = [
  "clap",
  "kdl",
  "mort-bridge",
+ "mort-compose",
  "mort-proto",
  "mort-session",
  "serde_json",
@@ -455,6 +456,8 @@ name = "mort-compose"
 version = "0.1.0"
 dependencies = [
  "kdl",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

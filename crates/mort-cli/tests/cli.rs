@@ -1510,3 +1510,228 @@ fn the_view_server_outlives_the_bridge() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+// --- mort compose (ticket 0028) --------------------------------------------
+
+const SHEET: &str = r#"
+section "verse" bars=4 {
+    harmony "D dorian" bars=4
+}
+section "chorus" bars=4 {
+    harmony "Gm9" "C13" "Fmaj9" "Bbmaj7#11" bars=1
+}
+part "Pad" {
+    voicing "quartal" voices=4 range="C3..A4"
+}
+part "Keys" {
+    voicing "drop-2" voices=4 range="G3..D5"
+    articulation "bossa piano"
+}
+part "Bass" {
+    from "Keys" voice="bass"
+    articulation "walking"
+}
+part "Drums" {
+    articulation "bossa drums"
+}
+"#;
+
+/// A saved project at 120 bpm with Pad, Keys, Bass and Drums tracks and
+/// two 4-bar regions, and its sheet beside it.
+fn composing(name: &str, sheet: &str) -> (FakeBridge, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("mort-compose-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("song.mort")).unwrap();
+    std::fs::write(dir.join("song.mort").join("sheet.kdl"), sheet).unwrap();
+    let project = dir.join("song.rpp");
+    let path = project.to_string_lossy().into_owned();
+    let b = FakeBridge::start_with(name, move |s| {
+        use mort_session::{NewTrack, Session};
+        for t in ["Pad", "Keys", "Bass", "Drums", "Extra"] {
+            s.add_track(NewTrack {
+                name: t.into(),
+                ..NewTrack::default()
+            })
+            .unwrap();
+        }
+        s.add_region("verse", 0.0, Some(8.0));
+        s.add_region("chorus", 8.0, Some(16.0));
+        s.set_path(Some(&path));
+    });
+    (b, dir)
+}
+
+/// The action `mort compose write` printed for a part and section.
+fn action(out: &str, part: &str, section: &str) -> String {
+    out.lines()
+        .find(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            w.first() == Some(&part) && w.get(1) == Some(&section)
+        })
+        .map_or_else(
+            || panic!("{part} {section} in {out}"),
+            |l| l.split_whitespace().skip(2).collect::<Vec<_>>().join(" "),
+        )
+}
+
+#[test]
+fn compose_show_and_write() {
+    let (b, dir) = composing("write", SHEET);
+
+    let o = b.mort(&["compose", "show", "chorus"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let t = stdout(&o);
+    assert!(t.contains("Pad  (quartal, 4 voices, C3..A4)"), "{t}");
+    assert!(t.contains("Gm9 (G dorian)"), "{t}");
+    assert!(t.contains("Bass  (plays the bass voice of Keys)"), "{t}");
+    assert!(t.contains("Drums  (drums: bossa drums)"), "{t}");
+    assert!(t.contains("Bbmaj7#11 (Bb lydian)"), "{t}");
+    assert!(
+        !t.contains("A#"),
+        "pitches are spelled from the harmony: {t}"
+    );
+
+    let o = b.mort(&["compose", "show", "verse", "--notes", "--part", "Bass"]);
+    let t = stdout(&o);
+    assert_eq!(
+        t.lines().filter(|l| l.starts_with("  ")).count(),
+        16,
+        "a note a beat: {t}"
+    );
+
+    // First write: every part in every section, one undo point.
+    let o = b.mort(&["compose", "write"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let t = stdout(&o);
+    for p in ["Pad", "Keys", "Bass", "Drums"] {
+        for s in ["verse", "chorus"] {
+            assert_eq!(action(&t, p, s), "written: new", "{t}");
+        }
+    }
+    assert!(dir.join("song.mort/compose/state.json").exists());
+    let o = b.mort(&["midi", "Bass"]);
+    assert!(stdout(&o).lines().count() > 30, "{}", stdout(&o));
+
+    // Nothing changed: nothing written.
+    let t = stdout(&b.mort(&["compose", "write"]));
+    assert!(
+        t.lines().filter(|l| l.contains("unchanged")).count() == 8,
+        "{t}"
+    );
+
+    // A new articulation for Keys rewrites only Keys; Bass plays the same
+    // bass voice, so it is unchanged.
+    let sheet = SHEET.replace("articulation \"bossa piano\"", "articulation \"block\"");
+    std::fs::write(dir.join("song.mort/sheet.kdl"), &sheet).unwrap();
+    let t = stdout(&b.mort(&["compose", "write"]));
+    assert_eq!(
+        action(&t, "Keys", "verse"),
+        "written: articulation changed",
+        "{t}"
+    );
+    assert_eq!(
+        action(&t, "Keys", "chorus"),
+        "written: articulation changed",
+        "{t}"
+    );
+    for p in ["Pad", "Bass", "Drums"] {
+        assert_eq!(action(&t, p, "verse"), "unchanged", "{t}");
+    }
+
+    // A changed chord rewrites the chorus parts that depend on it.
+    let sheet = sheet.replace("\"C13\"", "\"C7sus4\"");
+    std::fs::write(dir.join("song.mort/sheet.kdl"), &sheet).unwrap();
+    let t = stdout(&b.mort(&["compose", "write"]));
+    assert!(
+        action(&t, "Pad", "chorus").starts_with("written: harmony changed"),
+        "{t}"
+    );
+    assert!(
+        action(&t, "Keys", "chorus").starts_with("written: harmony changed"),
+        "{t}"
+    );
+    assert_eq!(action(&t, "Drums", "chorus"), "unchanged", "{t}");
+
+    // A note added by hand protects the item until --force.
+    let o = b.mort(&["midi", "Pad", "1.1..2.1", "C5:1.1"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let t = stdout(&b.mort(&["compose", "write", "--force", "--part", "Keys"]));
+    assert!(!t.contains("Pad"), "only Keys: {t}");
+    let t = stdout(&b.mort(&["compose", "write"]));
+    assert!(
+        action(&t, "Pad", "verse").starts_with("edited by hand; left alone"),
+        "{t}"
+    );
+    let t = stdout(&b.mort(&[
+        "compose",
+        "write",
+        "--force",
+        "--part",
+        "Pad",
+        "--section",
+        "verse",
+    ]));
+    assert_eq!(
+        action(&t, "Pad", "verse"),
+        "written: edited by hand; overwritten (--force)",
+        "{t}"
+    );
+    let t = stdout(&b.mort(&["compose", "write"]));
+    assert_eq!(action(&t, "Pad", "verse"), "unchanged", "{t}");
+
+    // The last write was one undo point.
+    let o = b.mort(&["compose", "write", "--force", "--part", "Drums"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = b.mort(&["undo"]);
+    assert!(stdout(&o).contains("compose Drums"), "{}", stdout(&o));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn compose_refuses_what_it_should_not_touch() {
+    // MIDI that mort did not write.
+    let sheet = format!(
+        "{SHEET}\npart \"Extra\" {{\n    voicing \"close\" voices=3 range=\"C4..C5\"\n}}\n"
+    );
+    let (b, dir) = composing("refuse", &sheet);
+    let o = b.mort(&["midi", "Extra", "1.1..2.1", "C4:1.1"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = b.mort(&["compose", "write"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("track `Extra` has MIDI in section `verse` that mort did not write"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(
+        !dir.join("song.mort/compose/state.json").exists(),
+        "nothing was written"
+    );
+
+    // A region that disagrees with the sheet.
+    std::fs::write(
+        dir.join("song.mort/sheet.kdl"),
+        SHEET
+            .replace("section \"verse\" bars=4", "section \"verse\" bars=3")
+            .replace("harmony \"D dorian\" bars=4", "harmony \"D dorian\" bars=3"),
+    )
+    .unwrap();
+    let o = b.mort(&["compose", "write"]);
+    assert!(
+        stderr(&o).contains(
+            "region `verse` runs 0.000s to 8.000s, but the sheet's 3 bars of 4/4 end at 6.000s"
+        ),
+        "{}",
+        stderr(&o)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // An unsaved project.
+    let b = FakeBridge::start_with("unsaved", |_| {});
+    let o = b.mort(&["compose", "write"]);
+    assert!(
+        stderr(&o).contains("save the project first"),
+        "{}",
+        stderr(&o)
+    );
+}

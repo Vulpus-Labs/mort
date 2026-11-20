@@ -15,6 +15,7 @@ path = "src/main.rs"
 clap = { version = "4.6", features = ["derive"] }
 kdl.workspace = true
 mort-proto.workspace = true
+mort-compose = { path = "../mort-compose" }
 serde_json.workspace = true
 
 [dev-dependencies]

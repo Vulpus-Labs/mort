@@ -19,3 +19,13 @@ Run E004's proof in REAPER and listen to the result.
       adjusted by ear where they sound wrong, and the reasons recorded
       (ADR 0013, Consequences).
 - [ ] ADR 0013 updated with what changed, and its status set to Accepted.
+
+## Notes from earlier tickets
+
+- 0028: with the default weights, a quartal pad over Gm9 C13 Fmaj9
+  Bbmaj7#11 holds E A D G through all four chords, because that stack
+  fits each of them and holding costs least. Listen: if the pad should
+  follow the changes, weigh the bottom voice towards chord tones, or
+  lower `common`.
+- 0027: bossa piano over `rootless` voicings doubles the 7th or 3rd in
+  the left hand. Use drop-2 or shell voicings for a root bass.

@@ -9,7 +9,7 @@
 use std::fmt;
 
 use crate::chord::{ChordError, ChordSymbol, Role, Seventh, Triad};
-use crate::pitch::{PitchClass, Spelling};
+use crate::pitch::{Pitch, PitchClass, Spelling};
 use crate::scale::{self, SCALES, Scale, ScaleDef};
 
 /// The kind of chord, for choosing a default scale.
@@ -245,6 +245,8 @@ impl From<ChordError> for HarmonyError {
 pub struct Harmony {
     /// The root.
     pub root: PitchClass,
+    /// The root as written, for spelling.
+    pub name: Spelling,
     /// The scale.
     pub scale: Scale,
     /// Why this scale, when it was chosen by default.
@@ -277,7 +279,7 @@ impl Harmony {
                     message: format!("`{text}` is already a scale; drop `scale=`"),
                 });
             }
-            return Ok(Self::from_scale(root.pitch_class(), def));
+            return Ok(Self::from_scale(root, def));
         }
         let chord = ChordSymbol::parse(text)?;
         let over = match scale {
@@ -321,7 +323,7 @@ impl Harmony {
         };
         let bass = chord.bass.map_or(root, Spelling::pitch_class);
         Ok(Self::complete(
-            root,
+            chord.root,
             scale,
             scale_reason,
             Some(chord),
@@ -333,7 +335,8 @@ impl Harmony {
     /// A harmony from a bare scale: its chord tones are the scale's own
     /// root, third, fifth and seventh.
     #[must_use]
-    pub fn from_scale(root: PitchClass, def: &'static ScaleDef) -> Self {
+    pub fn from_scale(name: Spelling, def: &'static ScaleDef) -> Self {
+        let root = name.pitch_class();
         let scale = Scale { root, def };
         let tones = scale_chord(def)
             .into_iter()
@@ -342,17 +345,18 @@ impl Harmony {
                 pc: root.plus(i32::from(i)),
             })
             .collect();
-        Self::complete(root, scale, None, None, root, tones)
+        Self::complete(name, scale, None, None, root, tones)
     }
 
     fn complete(
-        root: PitchClass,
+        name: Spelling,
         scale: Scale,
         scale_reason: Option<&'static str>,
         chord: Option<ChordSymbol>,
         bass: PitchClass,
         tones: Vec<Note>,
     ) -> Self {
+        let root = name.pitch_class();
         let has_seventh = tones
             .iter()
             .any(|t| matches!(t.role, Role::Seventh | Role::Sixth));
@@ -374,6 +378,7 @@ impl Harmony {
         }
         Self {
             root,
+            name,
             scale,
             scale_reason,
             chord,
@@ -382,6 +387,56 @@ impl Harmony {
             tensions,
             avoid,
         }
+    }
+
+    /// `p` spelled for this harmony: a note with a role takes its role's
+    /// letter (A7alt's 3rd is C#, its #9 B#); another scale note takes its
+    /// degree's letter (B flat, not A sharp, in E flat lydian); any other
+    /// note is sharp, or flat if the root is.
+    #[must_use]
+    pub fn spell(&self, p: Pitch) -> String {
+        let pc = p.class();
+        let flats = self.name.accidental < 0
+            || (self.name.letter == crate::pitch::Letter::F && self.name.accidental == 0);
+        let steps = self.scale.def.steps;
+        let scale_root = if self.scale.root == self.root {
+            Some(self.name)
+        } else {
+            plain_spelling(self.scale.root, flats)
+        };
+        let by_degree = scale_root.filter(|_| steps.len() == 7).and_then(|r| {
+            let i = steps
+                .iter()
+                .position(|s| self.scale.root.plus(i32::from(*s)) == pc)?;
+            Spelling::with_letter(pc, r.letter_up(i))
+        });
+        // A note with a role takes that role's letter: A7alt's 3rd is C#
+        // and its #9 B#, though the altered scale's degrees would say D
+        // flat and C.
+        let role = self
+            .available()
+            .iter()
+            .chain(&self.avoid)
+            .find(|n| n.pc == pc)
+            .map(|n| n.role);
+        let by_role = role.and_then(|r| {
+            let steps_up = match r {
+                Role::Root => 0,
+                Role::Second | Role::Tension(9) => 1,
+                Role::Third => 2,
+                Role::Fourth | Role::Tension(11) => 3,
+                Role::Fifth => 4,
+                Role::Sixth | Role::Tension(13) => 5,
+                Role::Seventh | Role::Tension(_) => 6,
+            };
+            Spelling::with_letter(pc, self.name.letter_up(steps_up))
+        });
+        let Some(sp) = by_role.or(by_degree).or_else(|| plain_spelling(pc, flats)) else {
+            return p.to_string();
+        };
+        let natural = i32::from(sp.letter.natural().get()) + i32::from(sp.accidental);
+        let octave = (i32::from(p.get()) - natural).div_euclid(12) - 1;
+        format!("{sp}{octave}")
     }
 
     /// Every note that may sound: chord tones and available tensions.
@@ -412,6 +467,31 @@ fn unknown_scale(name: &str) -> HarmonyError {
             "`{name}` is not a scale mort knows; use one such as `dorian`, `lydian dominant` or `altered` (see mort_compose::scale::SCALES)"
         ),
     }
+}
+
+/// A pitch class with a natural if it has one, else a sharp, or a flat
+/// if `flats`.
+fn plain_spelling(pc: PitchClass, flats: bool) -> Option<Spelling> {
+    use crate::pitch::Letter;
+    let letters = [
+        Letter::C,
+        Letter::D,
+        Letter::E,
+        Letter::F,
+        Letter::G,
+        Letter::A,
+        Letter::B,
+    ];
+    let with = |acc: i8| {
+        letters
+            .iter()
+            .find(|l| l.natural().plus(i32::from(acc)) == pc)
+            .map(|l| Spelling {
+                letter: *l,
+                accidental: acc,
+            })
+    };
+    with(0).or_else(|| if flats { with(-1) } else { with(1) })
 }
 
 /// `D dorian`: a root, a space, and a scale name.
@@ -613,6 +693,25 @@ mod tests {
         assert_eq!(pcs(&h.tones), vec![0, 4, 7, 9]);
         let h = Harmony::parse("C diminished", None).unwrap();
         assert_eq!(pcs(&h.tones), vec![0, 3, 6, 9]);
+    }
+
+    #[test]
+    fn spelling_follows_the_harmony() {
+        let p = |t: &str| Pitch::parse(t).unwrap();
+        let h = Harmony::parse("Eb lydian", None).unwrap();
+        assert_eq!(h.spell(p("A#3")), "Bb3");
+        assert_eq!(h.spell(p("A4")), "A4", "the #11");
+        let h = Harmony::parse("A7alt", None).unwrap();
+        let names: Vec<String> = ["A3", "C#4", "G4", "A#4", "C5", "D#5", "F5"]
+            .iter()
+            .map(|n| h.spell(p(n)))
+            .collect();
+        assert_eq!(names, ["A3", "C#4", "G4", "Bb4", "B#4", "D#5", "F5"]);
+        let h = Harmony::parse("F#m7", None).unwrap();
+        assert_eq!(h.spell(p("A4")), "A4");
+        assert_eq!(h.spell(p("D#4")), "D#4");
+        let h = Harmony::parse("Cb lydian", None).unwrap();
+        assert_eq!(h.spell(p("B3")), "Cb4", "octave follows the letter");
     }
 
     #[test]

@@ -5,6 +5,7 @@
 
 mod automation;
 mod client;
+mod compose;
 mod edits;
 mod install;
 mod measure;
@@ -103,6 +104,11 @@ enum Command {
 
     /// List or write MIDI notes and CCs.
     Midi(midi::Midi),
+
+    /// Show or write parts from the song sheet (`<project>.mort/sheet.kdl`):
+    /// harmony voiced into blocks, then articulated (ADR 0013).
+    #[command(subcommand)]
+    Compose(compose::ComposeCmd),
 
     /// Play a range through the monitors, stopping at its end.
     Play(transport::RangeJob),
@@ -347,6 +353,7 @@ fn step(cmd: &Command, c: &mut Client) -> Result<(Vec<String>, Value), Outcome> 
         }
         Command::Automate(a) => automation::run(c, a)?,
         Command::Midi(m) => midi::run(c, m)?,
+        Command::Compose(cmd) => compose::run(c, cmd)?,
         Command::Play(a) => transport::run(c, a, false)?,
         Command::Render(a) => transport::run(c, a, true)?,
         Command::Stop => transport::stop(c)?,

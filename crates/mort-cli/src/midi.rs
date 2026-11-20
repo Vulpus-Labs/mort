@@ -17,6 +17,7 @@
 //! `ccN[@CHANNEL]:START=VALUE`.
 
 use clap::Args;
+use mort_compose::pitch::Pitch;
 use serde_json::{Value, json};
 
 use crate::client::{Client, Failure};
@@ -40,50 +41,25 @@ pub struct Midi {
     file: Option<std::path::PathBuf>,
 }
 
-const NAMES: [&str; 12] = [
-    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
-];
-
 /// `60` for `C4`, `61` for `C#4` or `Db4`, or the number itself.
 pub fn parse_pitch(text: &str) -> Result<u8, Failure> {
-    let bad = || {
+    let t = text.trim();
+    let n = t
+        .parse::<u8>()
+        .ok()
+        .filter(|n| *n <= 127)
+        .or_else(|| Pitch::parse(t).map(Pitch::get));
+    n.ok_or_else(|| {
         Failure::Local(format!(
             "`{text}` is not a pitch; write a name such as `C4` (middle C), `F#2` or `Bb3`, or 0–127"
         ))
-    };
-    let t = text.trim();
-    if let Ok(n) = t.parse::<u8>() {
-        return if n <= 127 { Ok(n) } else { Err(bad()) };
-    }
-    let mut chars = t.chars();
-    let letter = chars.next().ok_or_else(bad)?.to_ascii_uppercase();
-    let base: i32 = match letter {
-        'C' => 0,
-        'D' => 2,
-        'E' => 4,
-        'F' => 5,
-        'G' => 7,
-        'A' => 9,
-        'B' => 11,
-        _ => return Err(bad()),
-    };
-    let rest: String = chars.collect();
-    let (shift, octave) = if let Some(o) = rest.strip_prefix('#') {
-        (1, o)
-    } else if let Some(o) = rest.strip_prefix('b') {
-        (-1, o)
-    } else {
-        (0, rest.as_str())
-    };
-    let octave: i32 = octave.parse().map_err(|_| bad())?;
-    let n = (octave + 1) * 12 + base + shift;
-    u8::try_from(n).ok().filter(|n| *n <= 127).ok_or_else(bad)
+    })
 }
 
 /// `C4` for 60.
 #[must_use]
 pub fn pitch_name(n: u8) -> String {
-    format!("{}{}", NAMES[usize::from(n % 12)], i32::from(n / 12) - 1)
+    Pitch::new(i32::from(n)).map_or_else(|| n.to_string(), |p| p.to_string())
 }
 
 enum Event {

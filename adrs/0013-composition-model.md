@@ -221,25 +221,40 @@ modal writing works from a scale held over several bars.
      amount. The generator is a fixed SplitMix64, seeded from the part,
      section and seed, so the same sheet always plays the same.
 
-9. **Inspection.** `mort compose show <section> --blocks` lists the
-   voiced blocks with their labels. `--notes` lists the notes the
-   articulation would write. Both are read-only, so harmony can be
-   agreed before any rhythm exists, and a change can be previewed
-   before it is written.
+9. **Inspection.** `mort compose show <section>` lists the voiced
+   blocks with their labels. `--notes` lists the notes the articulation
+   would write. Both are read-only, so harmony can be agreed before any
+   rhythm exists, and a change can be previewed before it is written.
+   `--sheet PATH` previews a sheet that is not the project's. Pitches
+   are spelled from the harmony (ticket 0028): a note with a role takes
+   that role's letter, so A7alt's ♯9 is B♯; other scale notes take
+   their degree's letter.
 
 10. **Ownership and provenance.**
     - Each part writes one MIDI item per section on its track, covering
       the section exactly. mort owns those items.
-    - For each item it records, in `<project>.mort/compose/`:
-      - a hash of the inputs to each layer;
-      - the seed;
-      - a hash of the notes it wrote.
-    - Changing a layer marks that layer and everything below it as
-      stale, in the same way as the mix map (ADR 0006 §3):
-      - a new articulation regenerates only the notes;
-      - a new chord regenerates blocks and notes.
-    - `mort compose write` regenerates stale items, one undo point per
-      run (ADR 0004).
+    - For each item it records, in `<project>.mort/compose/state.json`:
+      - a hash of the inputs to each layer (the seed is part of the
+        feel);
+      - a hash of the notes it generated;
+      - a hash of the notes as REAPER holds them just after writing.
+    - **Whether to rewrite is decided by the generated notes** (ticket
+      0028), not by the inputs. Voice-leading runs across section
+      boundaries, so a chord changed in one section can rightly move the
+      voicing in the next, and only comparing the output catches exactly
+      that. The input hashes say why an item changed: a new articulation
+      reports "articulation changed" and touches only that part, and a
+      new chord reports "harmony changed".
+    - `mort compose write` writes every changed item in one `batch` of
+      `midi.write` calls, so one undo point per run (ADR 0004).
+    - Each section is the region of the same name. A region whose
+      length, through the tempo map, disagrees with the sheet's bars is
+      an error before anything is written.
+    - mort refuses, before writing anything:
+      - MIDI items in a section that it did not write (they are the
+        person's);
+      - two parts writing the same track in the same section.
+    - Drum parts write on channel 10.
     - An item whose notes no longer match the recorded hash was edited
       by hand. mort will not overwrite it without `--force`, and says
       which items those are.
