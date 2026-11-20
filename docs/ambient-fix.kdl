@@ -1,0 +1,12 @@
+// Fixes after the first measurement: undo the range probing left on
+// Glass, take the pad down and out of the drone's way.
+set Glass Kritter "High Pass" 0 normalised=#true
+set Glass Kritter Select 0 normalised=#true
+set Glass Kritter Balance 0 normalised=#true
+set Glass Kritter Reso 0.05 normalised=#true
+set Glass Kritter Env 0.1 normalised=#true
+set Glass Kritter Long 0 normalised=#true
+set Glass Kritter "Chorus Hiss" 0 normalised=#true
+set Pad Kritter "High Pass" 0.3 normalised=#true
+track set Pad volume=-28
+commit

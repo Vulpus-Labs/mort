@@ -1,0 +1,16 @@
+// An ambient piece: synths only. Drone, a soft low pulse, a pad, sparse
+// high glass notes and a swelling hiss, all sent to a shared reverb.
+track add Drone
+track add Pulse
+track add Pad
+track add Glass
+track add Hiss
+track add Space
+commit
+fx add Drone vxn-2b
+fx add Pulse vxn-1c
+fx add Pad vxn-2b
+fx add Glass "silkscreen Poly-Kritter"
+fx add Hiss "silkscreen Poly-Kritter"
+fx add Space ReaVerbate
+commit

@@ -1,0 +1,105 @@
+// Sounds for the ambient piece: every voice is Poly-Kritter, programmed
+// by normalised parameter values (probed ranges in docs/ambient-proof.md).
+fx rm Drone 1
+fx rm Pulse 1
+fx rm Pad 1
+commit
+fx add Drone "silkscreen Poly-Kritter"
+fx add Pulse "silkscreen Poly-Kritter"
+fx add Pad "silkscreen Poly-Kritter"
+commit
+set Drone Kritter "Wave" 0.0 normalised=#true
+set Drone Kritter "Scale" 0.33 normalised=#true
+set Drone Kritter "Select" 0.0 normalised=#true
+set Drone Kritter "Balance" 0.3 normalised=#true
+set Drone Kritter "Detune" 0.4 normalised=#true
+set Drone Kritter "Low Pass" 0.45 normalised=#true
+set Drone Kritter "Reso" 0.1 normalised=#true
+set Drone Kritter "Attack" 1.0 normalised=#true
+set Drone Kritter "Sustain" 1.0 normalised=#true
+set Drone Kritter "Decay" 0.75 normalised=#true
+set Drone Kritter "Chorus On" 1.0 normalised=#true
+set Drone Kritter "Chorus Mix" 0.4 normalised=#true
+set Drone Kritter "Chorus Drift" 0.3 normalised=#true
+set Drone Kritter "Gain" 0.45 normalised=#true
+set Pulse Kritter "Wave" 0.0 normalised=#true
+set Pulse Kritter "Scale" 0.33 normalised=#true
+set Pulse Kritter "Low Pass" 0.36 normalised=#true
+set Pulse Kritter "Env" 0.2 normalised=#true
+set Pulse Kritter "Reso" 0.1 normalised=#true
+set Pulse Kritter "Attack" 0.12 normalised=#true
+set Pulse Kritter "Sustain" 0.0 normalised=#true
+set Pulse Kritter "Decay" 0.42 normalised=#true
+set Pulse Kritter "Gain" 0.5 normalised=#true
+set Pad Kritter "Wave" 1.0 normalised=#true
+set Pad Kritter "Scale" 0.5 normalised=#true
+set Pad Kritter "Low Pass" 0.6 normalised=#true
+set Pad Kritter "Reso" 0.15 normalised=#true
+set Pad Kritter "Detune" 0.45 normalised=#true
+set Pad Kritter "Attack" 1.0 normalised=#true
+set Pad Kritter "Sustain" 1.0 normalised=#true
+set Pad Kritter "Decay" 0.75 normalised=#true
+set Pad Kritter "Long" 1.0 normalised=#true
+set Pad Kritter "Chorus On" 1.0 normalised=#true
+set Pad Kritter "Chorus Mix" 0.5 normalised=#true
+set Pad Kritter "Chorus Drift" 0.4 normalised=#true
+set Pad Kritter "Reverb On" 1.0 normalised=#true
+set Pad Kritter "Reverb Size" 0.85 normalised=#true
+set Pad Kritter "Reverb Decay" 0.85 normalised=#true
+set Pad Kritter "Reverb Mix" 0.35 normalised=#true
+set Pad Kritter "Gain" 0.4 normalised=#true
+set Glass Kritter "Wave" 0.0 normalised=#true
+set Glass Kritter "Scale" 0.66 normalised=#true
+set Glass Kritter "Low Pass" 0.82 normalised=#true
+set Glass Kritter "Attack" 0.08 normalised=#true
+set Glass Kritter "Sustain" 0.0 normalised=#true
+set Glass Kritter "Decay" 0.55 normalised=#true
+set Glass Kritter "Delay On" 1.0 normalised=#true
+set Glass Kritter "Delay Time" 0.6 normalised=#true
+set Glass Kritter "Delay Feedback" 0.55 normalised=#true
+set Glass Kritter "Delay Mix" 0.35 normalised=#true
+set Glass Kritter "Delay Ping-Pong" 1.0 normalised=#true
+set Glass Kritter "Reverb On" 1.0 normalised=#true
+set Glass Kritter "Reverb Size" 0.9 normalised=#true
+set Glass Kritter "Reverb Decay" 0.9 normalised=#true
+set Glass Kritter "Reverb Mix" 0.45 normalised=#true
+set Glass Kritter "Gain" 0.35 normalised=#true
+set Hiss Kritter "Select" 1.0 normalised=#true
+set Hiss Kritter "Balance" 1.0 normalised=#true
+set Hiss Kritter "Wave" 0.0 normalised=#true
+set Hiss Kritter "High Pass" 0.6 normalised=#true
+set Hiss Kritter "Low Pass" 0.76 normalised=#true
+set Hiss Kritter "Attack" 1.0 normalised=#true
+set Hiss Kritter "Sustain" 1.0 normalised=#true
+set Hiss Kritter "Decay" 0.75 normalised=#true
+set Hiss Kritter "Chorus On" 1.0 normalised=#true
+set Hiss Kritter "Chorus Mix" 0.5 normalised=#true
+set Hiss Kritter "Reverb On" 1.0 normalised=#true
+set Hiss Kritter "Reverb Size" 0.8 normalised=#true
+set Hiss Kritter "Reverb Decay" 0.8 normalised=#true
+set Hiss Kritter "Reverb Mix" 0.5 normalised=#true
+set Hiss Kritter "Gain" 0.3 normalised=#true
+set Space ReaVerbate 0 0.5 normalised=#true
+set Space ReaVerbate Dry 0 normalised=#true
+set Space ReaVerbate "Room size" 1 normalised=#true
+set Space ReaVerbate Dampening 0.65 normalised=#true
+set Space ReaVerbate Hipass 0.1 normalised=#true
+send add Drone Space
+send add Pulse Space
+send add Pad Space
+send add Glass Space
+send add Hiss Space
+commit
+// A send added in a held batch is not visible to `send set` yet.
+send set Drone Space volume=-12
+send set Pulse Space volume=-18
+send set Pad Space volume=-8
+send set Glass Space volume=-4
+send set Hiss Space volume=-6
+track set Drone volume=-10
+track set Pulse volume=-12
+track set Pad volume=-12
+track set Glass volume=-16
+track set Hiss volume=-24
+track set Space volume=-6
+commit

@@ -1,0 +1,13 @@
+// Patterns for the ambient piece.
+pattern "heartbeat" {
+    description "A slow lub-dub on the bass voice, once a bar."
+    hit "bass" at="1" length=1 velocity=72
+    hit "bass" at="1&" length=1.5 velocity=50
+}
+
+pattern "glints" bars=4 {
+    description "Sparse high notes, one voice at a time, across four bars."
+    hit "top" at="1 4:4" length=2 velocity=58
+    hit "inner" at="2:3&" length=2 velocity=50
+    hit "bass" at="3:2" length=2 velocity=46
+}

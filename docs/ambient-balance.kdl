@@ -1,0 +1,9 @@
+// Balance by measurement: pad as the body, drone and pulse beneath,
+// glass and hiss as detail, more of the shared reverb.
+track set Pad volume=-18
+track set Drone volume=-13.5
+track set Pulse volume=-16
+track set Glass volume=-6
+track set Hiss volume=-18.5
+track set Space volume=0
+commit

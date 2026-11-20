@@ -1,0 +1,48 @@
+// An ambient piece in D lydian, about three minutes at 70 bpm.
+section "intro" bars=8 {
+    harmony "D lydian" bars=8
+}
+section "a" bars=12 {
+    harmony "Dmaj9" "Bm11" "Gmaj7#11" bars=4
+}
+section "b" bars=12 {
+    harmony "Em9" "Cmaj7#11" "Gmaj9/B" bars=4
+}
+section "c" bars=12 {
+    harmony "Bb lydian" bars=6
+    harmony "D lydian" bars=6
+}
+section "outro" bars=8 {
+    harmony "Dmaj9" bars=8
+}
+
+// A D pedal under everything, with each harmony's fifth above it. The
+// instrument is set to 16', so it sounds an octave lower than written.
+part "Drone" {
+    voicing "root fifth" voices=2 range="D2..A3"
+    pedal "D2"
+}
+// Open quartal voicings, held, with slow suspensions over the changes.
+part "Pad" {
+    voicing "quartal" voices=4 range="G3..C6"
+    nct "suspension" beats=2
+    feel velocity=3 seed=1
+}
+// Sparse high notes (4', an octave above written), loosely timed.
+part "Glass" {
+    in "b" "c" "outro"
+    voicing "quartal" voices=3 range="C4..G5"
+    articulation "glints"
+    feel timing=24 velocity=8 seed=2
+}
+// A soft heartbeat on the root (16').
+part "Pulse" {
+    in "a" "b" "c"
+    voicing "root fifth" voices=2 range="D2..A3"
+    articulation "heartbeat"
+    feel velocity=4 seed=3
+}
+// One held note of white noise per harmony; volume automation shapes it.
+part "Hiss" {
+    voicing "close" voices=1 range="C4..C5"
+}

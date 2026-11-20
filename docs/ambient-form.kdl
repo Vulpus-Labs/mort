@@ -1,0 +1,7 @@
+// The ambient piece's regions, at 70 bpm.
+region add intro "1.1..9.1"
+region add a "9.1..21.1"
+region add b "21.1..33.1"
+region add c "33.1..45.1"
+region add outro "45.1..53.1"
+commit
