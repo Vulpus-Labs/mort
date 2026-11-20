@@ -1,0 +1,18 @@
+// The E004 proof's session: Pad, Keys, Bass and Drums, each with an
+// instrument, and two 8-bar regions. The parts come from the sheet.
+track add Pad
+track add Keys
+track add Bass
+track add Drums
+commit
+fx add Pad vxn-2b
+fx add Keys "silkscreen Poly-Kritter"
+fx add Bass vxn-1c
+fx add Drums ReaSynDr
+region add verse "1.1..9.1"
+region add chorus "9.1..17.1"
+track set Pad volume=-14
+track set Keys volume=-10
+track set Bass volume=-8
+track set Drums volume=-10
+commit

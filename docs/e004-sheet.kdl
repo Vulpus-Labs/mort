@@ -1,0 +1,21 @@
+// The E004 proof (ticket 0029): a modal verse and a chorus of changes.
+section "verse" bars=8 {
+    harmony "D dorian" bars=8
+}
+section "chorus" bars=8 {
+    harmony "Gm9" "C13" "Fmaj9" "Bbmaj7#11" "Gm9" "C13" "Fmaj9" "A7alt" bars=1
+}
+part "Pad" {
+    voicing "quartal" voices=4 range="C3..A4"
+}
+part "Keys" {
+    voicing "drop-2" voices=4 range="G3..D5"
+    articulation "bossa piano"
+}
+part "Bass" {
+    from "Keys" voice="bass"
+    articulation "walking" range="E1..G3"
+}
+part "Drums" {
+    articulation "bossa drums" kit="reasyndr"
+}

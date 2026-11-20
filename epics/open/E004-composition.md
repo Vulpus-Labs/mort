@@ -39,3 +39,11 @@ Decisions: ADR 0013, with ADR 0008's sidecar and section naming.
 ## Dependency order
 
 0024, then 0025, then 0026, then 0027, then 0028, then 0029.
+
+## Follow-ups found by the proof
+
+| Ticket | What |
+|---|---|
+| 0030 | `project.save` with a path saves a copy, not *Save as* |
+| 0031 | Parts are voiced alone; they need to avoid semitones against each other |
+| 0032 | `register_clash` counts drum MIDI as pitches |

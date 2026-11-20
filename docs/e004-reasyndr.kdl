@@ -1,0 +1,9 @@
+// ReaSynDr answers notes 48-51 (and 32-35): found by measuring each note
+// on the Drums track's probe (spectral centroid ~50, 150, 500, 120 Hz).
+kit "reasyndr" {
+    description "REAPER's ReaSynDr: four voices on notes 48-51."
+    piece "kick" 48
+    piece "snare" 49
+    piece "hat_closed" 50
+    piece "side_stick" 51
+}
