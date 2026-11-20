@@ -137,6 +137,8 @@ struct Step<'a> {
     weights: Weights,
     range: Range,
     candidates: Vec<Voicing>,
+    /// Pitches the parts voiced before this one sound during it.
+    against: Vec<u8>,
 }
 
 /// The bar and beat, from 1, of `ticks` into `section`.
@@ -161,7 +163,57 @@ pub fn voice_part(
     part: &Part,
     vocabularies: &Vocabularies,
 ) -> Result<Vec<Block>, LeadError> {
-    let steps = gather(sheet, part, vocabularies)?;
+    voice_part_against(sheet, part, vocabularies, &[])
+}
+
+/// Whether a part voices harmony of its own: it has a voicing somewhere
+/// it plays, and does not take another part's voices.
+fn voices_itself(sheet: &Sheet, part: &Part) -> bool {
+    part.from.is_none()
+        && sheet.sections.iter().any(|s| {
+            part.plays_in(&s.name)
+                && !s.spans.is_empty()
+                && part.spec_in(&s.name).vocabulary.is_some()
+        })
+}
+
+/// Voices `part` as it sounds with the others: the parts before it in
+/// the sheet are voiced first, in order, and each later part pays the
+/// `clash` cost for semitones against them (ADR 0013 §6, ticket 0031).
+///
+/// # Errors
+///
+/// [`LeadError`] for this part or any part voiced before it.
+pub fn voice_in_context(
+    sheet: &Sheet,
+    part: &Part,
+    vocabularies: &Vocabularies,
+) -> Result<Vec<Block>, LeadError> {
+    let mut earlier: Vec<Block> = Vec::new();
+    for p in &sheet.parts {
+        if p.name == part.name {
+            break;
+        }
+        if voices_itself(sheet, p) {
+            let bs = voice_part_against(sheet, p, vocabularies, &earlier)?;
+            earlier.extend(bs);
+        }
+    }
+    voice_part_against(sheet, part, vocabularies, &earlier)
+}
+
+/// Voices `part` paying the `clash` cost against `others`' notes.
+///
+/// # Errors
+///
+/// As [`voice_part`].
+pub fn voice_part_against(
+    sheet: &Sheet,
+    part: &Part,
+    vocabularies: &Vocabularies,
+    others: &[Block],
+) -> Result<Vec<Block>, LeadError> {
+    let steps = gather(sheet, part, vocabularies, others)?;
     let path = viterbi(&steps);
     let mut blocks: Vec<Block> = steps
         .iter()
@@ -189,6 +241,7 @@ fn gather<'a>(
     sheet: &'a Sheet,
     part: &Part,
     vocabularies: &Vocabularies,
+    others: &[Block],
 ) -> Result<Vec<Step<'a>>, LeadError> {
     let mut steps = Vec::new();
     for section in &sheet.sections {
@@ -272,9 +325,11 @@ fn gather<'a>(
                     ));
                 }
             }
+            let against = sounding(others, &section.name, span);
             steps.push(Step {
                 section,
                 span,
+                against,
                 weights: spec.weights(),
                 spec: spec.clone(),
                 range,
@@ -283,6 +338,19 @@ fn gather<'a>(
         }
     }
     Ok(steps)
+}
+
+/// The pitches `others` sound during `span` of `section`.
+fn sounding(others: &[Block], section: &str, span: &Span) -> Vec<u8> {
+    others
+        .iter()
+        .filter(|b| {
+            b.section == section
+                && b.start < span.start + span.length
+                && span.start < b.start + b.length
+        })
+        .flat_map(|b| b.notes.iter().map(|n| n.pitch.get()))
+        .collect()
 }
 
 /// Where a `fix` falls: ticks from its section's start.
@@ -350,7 +418,26 @@ fn unary(s: &Step<'_>, v: &Voicing) -> f64 {
     let mean = p.iter().map(|x| f64::from(*x)).sum::<f64>()
         / f64::from(u8::try_from(p.len()).unwrap_or(1));
     let mid = f64::midpoint(f64::from(s.range.low.get()), f64::from(s.range.high.get()));
-    s.weights.spacing * spacing + s.weights.centre * (mean - mid).abs()
+    // Semitones against the parts voiced before this one; a minor
+    // ninth counts half.
+    let mut clash = 0.0;
+    for x in &p {
+        for y in &s.against {
+            match x.abs_diff(*y) {
+                1 => clash += 1.0,
+                13 => clash += 0.5,
+                _ => {}
+            }
+        }
+    }
+    let ungrounded = v
+        .notes
+        .first()
+        .is_some_and(|n| matches!(n.role, Role::Tension(_)));
+    s.weights.spacing * spacing
+        + s.weights.centre * (mean - mid).abs()
+        + s.weights.clash * clash
+        + s.weights.bottom * f64::from(u8::from(ungrounded))
 }
 
 fn transition(weights: &Weights, from: &Voicing, to: &Voicing) -> f64 {

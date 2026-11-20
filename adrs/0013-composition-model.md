@@ -134,7 +134,19 @@ modal writing works from a scale held over several bars.
        third no lower than C3, a fifth no lower than B♭1);
      - parallel fifths and octaves;
      - voice crossing and overlap;
-     - distance from the middle of the range.
+     - distance from the middle of the range;
+     - a lowest note that is a tension rather than a chord tone
+       (`bottom`);
+     - semitones (and, at half weight, minor ninths) against the parts
+       voiced before this one (`clash`).
+   - **Parts are voiced in sheet order** (ticket 0031). Each part pays
+     `clash` against the notes of the parts above it in the sheet, so
+     the sheet's order says who gives way: put the keys before the pad.
+     The default (30) outweighs holding still, because a rub between
+     parts is a defect and not a matter of taste. It cannot help when
+     every candidate rubs, as with four-voice quartal inside a fifth of
+     the keys' register; there the sheet must separate the parts'
+     ranges.
    - The path runs through every harmony the part plays, in form order,
      across section boundaries. It restarts where the voice count
      changes.

@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use crate::lead::{Block, LeadError, Tone, Voice, voice_part};
+use crate::lead::{Block, LeadError, Tone, Voice, voice_in_context};
 use crate::part::Part;
 use crate::pattern::{Approach, Arp, At, Hit, Order, Pattern, Patterns, Walk};
 use crate::pitch::{Pitch, PitchClass};
@@ -232,13 +232,13 @@ fn blocks_for(
     vocabularies: &Vocabularies,
 ) -> Result<Vec<Block>, PlayError> {
     let Some((other, voices)) = &part.from else {
-        return Ok(voice_part(sheet, part, vocabularies)?);
+        return Ok(voice_in_context(sheet, part, vocabularies)?);
     };
     let source = sheet.part(other).ok_or_else(|| PlayError::Pattern {
         part: part.name.clone(),
         message: format!("`from` names part `{other}`, which the sheet does not have"),
     })?;
-    let mut blocks = voice_part(sheet, source, vocabularies)?;
+    let mut blocks = voice_in_context(sheet, source, vocabularies)?;
     blocks.retain(|b| part.plays_in(&b.section));
     if !voices.is_empty() {
         for b in &mut blocks {

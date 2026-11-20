@@ -349,3 +349,76 @@ fn part_errors_say_where() {
         .to_string();
     assert!(e.contains("must fall where a harmony starts"), "{e}");
 }
+
+/// Semitones between two parts' notes in blocks that overlap.
+fn rubs(a: &[Block], b: &[Block]) -> usize {
+    let mut n = 0;
+    for x in a {
+        for y in b.iter().filter(|y| {
+            y.section == x.section && y.start < x.start + x.length && x.start < y.start + y.length
+        }) {
+            for p in &x.notes {
+                for q in &y.notes {
+                    if p.pitch.get().abs_diff(q.pitch.get()) == 1 {
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn parts_are_voiced_against_the_parts_before_them() {
+    use mort_compose::lead::voice_in_context;
+    use mort_compose::voicing::Range;
+    let s = sheet(
+        r#"
+        section "chorus" bars=8 {
+            harmony "Gm9" "C13" "Fmaj9" "Bbmaj7#11" "Gm9" "C13" "Fmaj9" "A7alt" bars=1
+        }
+        part "Keys" {
+            voicing "drop-2" voices=4 range="G3..D5"
+        }
+        part "Pad" {
+            voicing "quartal" voices=4 range="C3..E5"
+        }
+        "#,
+    );
+    let v = Vocabularies::builtin();
+    let keys = voice_in_context(&s, s.part("Keys").unwrap(), &v).unwrap();
+    assert_eq!(
+        keys,
+        voice_part(&s, s.part("Keys").unwrap(), &v).unwrap(),
+        "the first part is voiced alone"
+    );
+    let alone = voice_part(&s, s.part("Pad").unwrap(), &v).unwrap();
+    let together = voice_in_context(&s, s.part("Pad").unwrap(), &v).unwrap();
+    // Alone, the pad holds A D G C and rubs against the keys' B flat in
+    // Gm9 (the E004 proof's clash).
+    assert!(rubs(&keys[..1], &alone[..1]) > 0);
+    // Against the keys, it rubs only where every quartal voicing would.
+    let quartal = v.get("quartal").unwrap();
+    for (k, p) in keys.iter().zip(&together) {
+        let free = quartal
+            .candidates(&p.harmony, Range::parse("C3..E5").unwrap(), 4)
+            .unwrap()
+            .iter()
+            .any(|c| {
+                c.notes.iter().all(|n| {
+                    k.notes
+                        .iter()
+                        .all(|m| n.pitch.get().abs_diff(m.pitch.get()) != 1)
+                })
+            });
+        if free {
+            assert_eq!(
+                rubs(std::slice::from_ref(k), std::slice::from_ref(p)),
+                0,
+                "{}",
+                p.text
+            );
+        }
+    }
+}

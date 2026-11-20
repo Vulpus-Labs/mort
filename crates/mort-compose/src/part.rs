@@ -3,7 +3,7 @@
 //! ```kdl
 //! part "Pad" track="Pad" {
 //!     voicing "quartal" voices=4 range="C3..A4"
-//!     weights movement=1 leaps=2 common=1 spacing=3 parallels=4 crossing=4 centre=0.05
+//!     weights movement=1 leaps=2 common=1 spacing=3 parallels=4 crossing=4 centre=0.05 clash=30 bottom=1
 //!     nct "passing" "suspension" beats=1   // in order of preference
 //!     pedal "D2"                           // the bass holds D2
 //!     in "verse" "chorus"                  // where it plays; all sections by default
@@ -49,6 +49,11 @@ pub struct Weights {
     pub crossing: f64,
     /// Per semitone the voicing's middle sits from the range's middle.
     pub centre: f64,
+    /// Per semitone (or minor ninth, at half) between this part's notes
+    /// and those of the parts voiced before it (ADR 0013 §6, ticket 0031).
+    pub clash: f64,
+    /// When the lowest note is a tension rather than a chord tone.
+    pub bottom: f64,
 }
 
 impl Default for Weights {
@@ -62,6 +67,8 @@ impl Default for Weights {
             parallels: 4.0,
             crossing: 4.0,
             centre: 0.05,
+            clash: 30.0,
+            bottom: 1.0,
         }
     }
 }
@@ -162,6 +169,8 @@ impl Spec {
                 "parallels" => w.parallels = *v,
                 "crossing" => w.crossing = *v,
                 "centre" | "center" => w.centre = *v,
+                "clash" => w.clash = *v,
+                "bottom" => w.bottom = *v,
                 _ => {}
             }
         }
@@ -381,32 +390,7 @@ fn read_spec(
                 }
             }
         }
-        "weights" => {
-            for (k, e) in props(c) {
-                if !matches!(
-                    k,
-                    "movement"
-                        | "leaps"
-                        | "common"
-                        | "spacing"
-                        | "parallels"
-                        | "crossing"
-                        | "centre"
-                        | "center"
-                ) {
-                    return Err(entry_err(
-                        e,
-                        format!(
-                            "`{k}` is not a weight; use movement, leaps, common, spacing, parallels, crossing or centre"
-                        ),
-                    ));
-                }
-                let v = number(e)
-                    .filter(|v| *v >= 0.0)
-                    .ok_or_else(|| entry_err(e, "a weight is a number, 0 or more".into()))?;
-                spec.weights.insert(k.to_string(), v);
-            }
-        }
+        "weights" => read_weights(spec, c, entry_err)?,
         "nct" => {
             let kinds = args(c)
                 .into_iter()
@@ -445,6 +429,40 @@ fn read_spec(
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+fn read_weights(
+    spec: &mut Spec,
+    c: &KdlNode,
+    entry_err: EntryErr<'_>,
+) -> Result<(), crate::sheet::SheetError> {
+    for (k, e) in props(c) {
+        if !matches!(
+            k,
+            "movement"
+                | "leaps"
+                | "common"
+                | "spacing"
+                | "parallels"
+                | "crossing"
+                | "centre"
+                | "center"
+                | "clash"
+                | "bottom"
+        ) {
+            return Err(entry_err(
+                e,
+                format!(
+                    "`{k}` is not a weight; use movement, leaps, common, spacing, parallels, crossing, centre, clash or bottom"
+                ),
+            ));
+        }
+        let v = number(e)
+            .filter(|v| *v >= 0.0)
+            .ok_or_else(|| entry_err(e, "a weight is a number, 0 or more".into()))?;
+        spec.weights.insert(k.to_string(), v);
+    }
+    Ok(())
 }
 
 fn read_articulation(

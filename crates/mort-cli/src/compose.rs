@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use mort_compose::articulate::{Event, Performance, play_part};
 use mort_compose::harmony::Harmony;
-use mort_compose::lead::{Block, Tone, voice_part};
+use mort_compose::lead::{Block, Tone, voice_in_context};
 use mort_compose::pattern::Patterns;
 use mort_compose::pitch::Pitch;
 use mort_compose::record::{self, Action, Entry, Layers, Record};
@@ -196,7 +196,7 @@ fn show(
         if notes {
             let perf = play_part(&l.sheet, p, &l.vocabularies, &l.patterns)
                 .map_err(|e| local(e.to_string()))?;
-            let blocks = voice_part(&l.sheet, p, &l.vocabularies).ok();
+            let blocks = voice_in_context(&l.sheet, p, &l.vocabularies).ok();
             lines.push(format!(
                 "{}  ({})",
                 p.name,
@@ -234,9 +234,8 @@ fn show(
                     lines.push(format!("{}  ({kind}: {pattern})", p.name));
                     continue;
                 }
-                None => {
-                    voice_part(&l.sheet, p, &l.vocabularies).map_err(|e| local(e.to_string()))?
-                }
+                None => voice_in_context(&l.sheet, p, &l.vocabularies)
+                    .map_err(|e| local(e.to_string()))?,
             };
             lines.push(format!(
                 "{}  ({}, {} voices, {})",

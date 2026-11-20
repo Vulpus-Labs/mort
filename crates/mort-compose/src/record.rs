@@ -320,7 +320,7 @@ pub fn decide(
     }
     let changed = layers.changed_from(&b.layers);
     Action::Write(if changed.is_empty() {
-        "voice-leading moved with a neighbouring section".into()
+        "voice-leading moved with a neighbouring section or another part".into()
     } else {
         format!("{} changed", changed.join(", "))
     })
@@ -379,7 +379,7 @@ mod tests {
         );
         assert_eq!(
             decide(Some(&e), Some("w"), "g2", &same, false),
-            Action::Write("voice-leading moved with a neighbouring section".into())
+            Action::Write("voice-leading moved with a neighbouring section or another part".into())
         );
     }
 
