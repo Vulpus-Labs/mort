@@ -1,0 +1,23 @@
+-- Render the master mix of bars 1-53 plus an 8 s tail to a WAV file,
+-- then put the project's render settings back as they were.
+local dir, name = "@DIR@", "@NAME@"
+local keys = {"RENDER_FILE", "RENDER_PATTERN", "RENDER_FORMAT"}
+local nums = {"RENDER_SETTINGS", "RENDER_BOUNDSFLAG", "RENDER_STARTPOS", "RENDER_ENDPOS",
+              "RENDER_SRATE", "RENDER_CHANNELS", "RENDER_ADDTOPROJ"}
+local saved_s, saved_n = {}, {}
+for _, k in ipairs(keys) do local _, v = reaper.GetSetProjectInfo_String(0, k, "", false); saved_s[k] = v end
+for _, k in ipairs(nums) do saved_n[k] = reaper.GetSetProjectInfo(0, k, 0, false) end
+local endpos = reaper.TimeMap2_beatsToTime(0, 0, 52) + 8.0
+reaper.GetSetProjectInfo_String(0, "RENDER_FILE", dir, true)
+reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", name, true)
+reaper.GetSetProjectInfo_String(0, "RENDER_FORMAT", "ZXZhdxgAAA==", true) -- WAV, 24-bit
+reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 0, true)     -- master mix
+reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", 0, true)   -- custom time range
+reaper.GetSetProjectInfo(0, "RENDER_STARTPOS", 0, true)
+reaper.GetSetProjectInfo(0, "RENDER_ENDPOS", endpos, true)
+reaper.GetSetProjectInfo(0, "RENDER_SRATE", 48000, true)
+reaper.GetSetProjectInfo(0, "RENDER_CHANNELS", 2, true)
+reaper.GetSetProjectInfo(0, "RENDER_ADDTOPROJ", 0, true)
+reaper.Main_OnCommand(42230, 0) -- File: Render project, using the most recent render settings, auto-close render dialog
+for k, v in pairs(saved_s) do reaper.GetSetProjectInfo_String(0, k, v, true) end
+for k, v in pairs(saved_n) do reaper.GetSetProjectInfo(0, k, v, true) end

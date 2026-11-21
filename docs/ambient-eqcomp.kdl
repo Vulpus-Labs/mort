@@ -1,0 +1,47 @@
+// ReaEQ gains are set as normalised values (0.5 x 10^(dB/20)): setting
+// them by text lands 6 dB too deep (ticket 0037).
+// Mix tweaks by measurement (the "after" of the A/B): ReaEQ to take the
+// pad's 315 Hz hump out and give each part its range; ReaComp to steady
+// the bass. No compression on the pad or hiss, whose throbs are the point.
+fx add Pad ReaEQ
+fx add Space ReaEQ
+fx add Bass ReaEQ
+fx add Bass ReaComp
+commit
+// Pad: bell -6 dB at 315 Hz (an octave wide), -3 dB at 3 kHz for the hiss,
+// low shelf -12 dB at 150 Hz as a low cut. ReaEQ's high-pass band is off by
+// default and its on/off is not a parameter (ticket 0038).
+set Pad ReaEQ "Freq-Band 2" 315
+set Pad ReaEQ "Gain-Band 2" 0.2506 normalised=#true  // -6 dB
+set Pad ReaEQ "BW-Band 2" 1.0
+set Pad ReaEQ "Freq-Band 3" 3000
+set Pad ReaEQ "Gain-Band 3" 0.354 normalised=#true  // -3 dB
+set Pad ReaEQ "BW-Band 3" 2.0
+set Pad ReaEQ "Freq-Low Shelf" 150
+set Pad ReaEQ "Gain-Low Shelf" 0.1256 normalised=#true  // -12 dB
+// Space (reverb return): low shelf -12 dB at 300 Hz as a low cut, high shelf -4 dB at 6 kHz.
+set Space ReaEQ "Freq-Low Shelf" 300
+set Space ReaEQ "Gain-Low Shelf" 0.1256 normalised=#true  // -12 dB
+set Space ReaEQ "Freq-High Shelf 4" 6000
+set Space ReaEQ "Gain-High Shelf 4" 0.3155 normalised=#true  // -4 dB
+// Bass: -4 dB at 300 Hz and -3 dB at 630 Hz for the pad and glass, high
+// shelf -6 dB from 1.5 kHz.
+set Bass ReaEQ "Freq-Band 2" 300
+set Bass ReaEQ "Gain-Band 2" 0.3155 normalised=#true  // -4 dB
+set Bass ReaEQ "BW-Band 2" 1.5
+set Bass ReaEQ "Freq-Band 3" 630
+set Bass ReaEQ "Gain-Band 3" 0.354 normalised=#true  // -3 dB
+set Bass ReaEQ "BW-Band 3" 1.0
+set Bass ReaEQ "Freq-High Shelf 4" 1500
+set Bass ReaEQ "Gain-High Shelf 4" 0.2506 normalised=#true  // -6 dB
+// Bass ReaComp: 3:1 from -24 dB, 20 ms attack, 250 ms release, 6 dB knee,
+// 20 ms RMS, detector high-passed at 30 Hz, 2 dB make-up.
+set Bass ReaComp Threshold -24
+set Bass ReaComp Ratio 3
+set Bass ReaComp Attack 20
+set Bass ReaComp Release 250
+set Bass ReaComp Knee 6
+set Bass ReaComp "RMS size" 20
+set Bass ReaComp Hipass 30
+set Bass ReaComp 11 2
+commit
