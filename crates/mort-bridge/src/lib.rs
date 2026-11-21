@@ -9,6 +9,7 @@
 //! - [`methods`]: the RPC methods, generic over the session.
 //! - [`measure`]: the `measure` job and the mix map it fills.
 //! - `reaper`: the extension entry point and the REAPER session.
+//! - `windows`: closing the results window a dry-run render leaves open.
 
 pub mod audition;
 pub mod dispatch;
@@ -23,3 +24,4 @@ mod chunk;
 mod raw;
 
 mod reaper;
+mod windows;

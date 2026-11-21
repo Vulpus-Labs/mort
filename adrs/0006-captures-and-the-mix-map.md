@@ -41,7 +41,12 @@ longer match the project are worse than none.
      REAPER's action *File: Dry run render project, using the most recent
      render settings* (43349), with the project's `RENDER_*` settings
      borrowed for the range and master mix and then put back. No file is
-     written. It is the default.
+     written. It is the default. The dry run leaves a results window
+     ("Finished in 0:00 (17x realtime)") that REAPER's "close when
+     finished" preference does not reach, so the bridge closes it: it
+     notes the results windows open before the render, and sends each new
+     one `IDCANCEL` (which it obeys; `WM_CLOSE` alone it ignores) through
+     SWELL. A results window from the person's own render stays.
    - `play` mode plays the range through the person's monitors in real
      time, for when the person wants to listen too.
    - **Pre-roll** (ticket 0017). The analyzer's windows start empty, so a

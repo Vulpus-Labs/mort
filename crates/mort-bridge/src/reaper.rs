@@ -73,6 +73,7 @@ fn log(line: &str) {
 
 #[reaper_macros::reaper_extension_plugin]
 fn plugin_main(context: PluginContext) -> std::result::Result<(), Box<dyn Error>> {
+    crate::windows::init(context);
     let session = ReaperSession::load(context);
     let reaper = session.reaper().clone();
     if let Err(e) = start(session) {
@@ -1460,7 +1461,14 @@ impl Session for Live {
         raw::set_project_info(r, "RENDER_SETTINGS", 0.0); // master mix
         raw::set_project_info(r, "RENDER_TAILFLAG", 0.0); // no tail
         raw::set_project_info(r, "RENDER_ADDTOPROJ", 0.0);
+        // A dry run leaves a results window up; close the one it opens.
+        let before = crate::windows::results_windows();
         raw::run_action(r, DRY_RUN_RENDER);
+        let closed = crate::windows::close_new_results(&before);
+        log(&format!(
+            "dry run: {} results window(s) open before, {closed} new closed",
+            before.len()
+        ));
         for (k, v) in saved {
             raw::set_project_info(r, k, v);
         }
