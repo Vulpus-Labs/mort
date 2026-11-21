@@ -11,7 +11,7 @@ depends: []
 
 `mort render` is a dry run by design (ADR 0006 §4), so A/B files for the
 ambient mix needed a Lua script in REAPER
-(`docs/ambient-render.lua.tmpl`). The script sets the `RENDER_*` project
+(`docs/render-wav.lua.tmpl`). The script sets the `RENDER_*` project
 settings, runs action 42230, and puts the settings back. An agent
 comparing mixes, or handing the person files to listen to, needs this
 in mort.

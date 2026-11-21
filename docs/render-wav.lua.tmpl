@@ -1,5 +1,15 @@
--- Render the master mix of bars 1-53 plus an 8 s tail to a WAV file,
--- then put the project's render settings back as they were.
+-- Render the master mix to a WAV file from inside REAPER, then put the
+-- project's render settings back as they were.
+--
+-- To use it: copy this file, replace @DIR@ with the folder to write to and
+-- @NAME@ with the file name (without .wav), change the end bar below if
+-- needed (52 means the end of bar 52, counted from 0), and run it in the
+-- REAPER that has the project open:
+--
+--   /Applications/REAPER.app/Contents/MacOS/REAPER -nonewinst render.lua
+--
+-- The file appears while it is still being written; wait for its size to
+-- stop changing before playing it.
 local dir, name = "@DIR@", "@NAME@"
 local keys = {"RENDER_FILE", "RENDER_PATTERN", "RENDER_FORMAT"}
 local nums = {"RENDER_SETTINGS", "RENDER_BOUNDSFLAG", "RENDER_STARTPOS", "RENDER_ENDPOS",
