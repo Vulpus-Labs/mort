@@ -26,8 +26,11 @@ impl Places {
     #[must_use]
     pub fn default_for_user() -> Places {
         let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
+        // Follow links: `~/.local/bin/mort` pointing into `target/release`
+        // should install from `target/release`.
         let from = std::env::current_exe()
             .ok()
+            .map(|p| p.canonicalize().unwrap_or(p))
             .and_then(|p| p.parent().map(Path::to_owned))
             .unwrap_or_else(|| PathBuf::from("."));
         Places {

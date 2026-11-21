@@ -110,10 +110,17 @@ mkdir -p ~/.local/bin
 ln -sf "$PWD/target/release/mort" ~/.local/bin/mort
 ```
 
-(add `~/.local/bin` to `PATH` in your shell profile if it is not there
-already). Keep the link pointing into the repository's `target/release`:
-`mort install` finds the bridge and probe it copies relative to where
-`mort` was built.
+If `~/.local/bin` is not on your `PATH` yet, add it, then open a new
+terminal. For zsh:
+
+```sh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+`mort install` copies the bridge and probe from the folder the `mort`
+binary is really in, following the link, so keep the link pointing into
+the repository's `target/release`. To install from somewhere else, pass
+`--from DIR`.
 
 Check that it works. Start REAPER, open or create a project, and run:
 
